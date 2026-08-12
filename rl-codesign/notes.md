@@ -24,8 +24,9 @@ sibling `numerics-and-sparse-attn/README.md` were finished).
   on a 70B model when stages sit on different devices; HybridFlow's engine
   cuts that by 55.2% average (~11.7s), up to 89.1% (~78.2s) — reduced,
   never eliminated.
-- **RLHFuse** (arXiv 2409.13221 — found fresh via search, not in the
-  original spec's reading list): two distinct colocated bottlenecks —
+- **RLHFuse** (arXiv 2409.13221 — was already in the original spec's
+  reading list as "course reading," just without a citation; found the
+  actual arXiv number via search): two distinct colocated bottlenecks —
   generation stragglers (long-tailed response lengths) and training
   pipeline bubbles — fixed via dynamically migrating straggler samples to
   dedicated instances mid-iteration, repurposing freed GPUs. A third

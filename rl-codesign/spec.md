@@ -35,8 +35,17 @@ MoE rather than settling on one.
 - **Colocated/resharding**: HybridFlow (arXiv 2409.19256) — single/
   multi-controller hybrid, the 3D-HybridEngine's actual resharding mechanism
   (claimed zero memory redundancy — verify what that actually means
-  mechanically, don't take the claim at face value). RLHFuse (course
-  reading, read fresh — not covered in the search above).
+  mechanically, don't take the claim at face value). RLHFuse (arXiv
+  2409.13221, course reading, read fresh — not covered in the search
+  above). Miles (SGLang/RadixArk, PyTorch/LMSYS blog posts, not a paper —
+  added mid-Phase-1 after a direct question, not part of the original
+  search: a real, current production framework implementing both
+  colocated and disaggregated layouts as a launch-time config choice, not
+  a research pick of one side — read for its weight-sync mechanism
+  (dedicated NCCL/RDMA channels), its unified precision recipe spanning
+  rollout+training, and "Rollout Routing Replay," a real MoE
+  routing-drift concern between rollout and training recomputation not
+  covered by any other source on this list).
 - **Disaggregated/asynchronous**: RhymeRL (arXiv 2508.18588 — dedicated
   rollout/reward/train workers, streaming pipeline), AReaL (staleness-aware
   PPO variant — read specifically for how it *quantifies* acceptable
