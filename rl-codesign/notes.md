@@ -103,3 +103,24 @@ Phase 1's accounting, not folded into rollout.
 
 Placement: shares rollout's chip pool by default (both pure inference, no
 training state) unless something concrete pushes back on that later.
+
+### Decision 2: fresh treatment for precision (not a direct reuse of decode's §4.1 framework)
+
+Decode's coupled/decoupled framework (`decode_notes.md` §4.1) answers
+"does a numerics lever flip *one workload's own* regime" — RL's
+weight-sync question is a different kind of question: the one-time cost
+of the BF16(training)→FP4(rollout) conversion at the sync boundary, a
+transition cost *between* two workloads, not a within-workload lever.
+Direction-reversal detail confirmed real: TPU 8i's FP4 peak is achieved
+via *native* FP4 compute — storage and compute precision match on the
+rollout side (the "coupled" case in decode's own vocabulary), but that's
+incidental, not the actual question being asked. **Fresh derivation
+needed for Phase 3**, carrying over only the vocabulary/discipline, not
+the formula itself.
+
+TPU 8i's real BF16 peak: **not stated** in Google Cloud's primary source
+(only FP4=10.1 PFLOPS is given). Provisional estimate via the
+halving-per-precision-step pattern documented for the sibling TPU 8t chip
+(FP4 12.6→FP8 6.3→BF16 3.15 PFLOPS): applying the same ratio to 8i gives
+**≈5.05 PFLOPS FP8, ≈2.525 PFLOPS BF16** — **unconfirmed, needs a real
+verification pass before Phase 2 depends on it.**
