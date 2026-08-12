@@ -124,3 +124,23 @@ halving-per-precision-step pattern documented for the sibling TPU 8t chip
 (FP4 12.6→FP8 6.3→BF16 3.15 PFLOPS): applying the same ratio to 8i gives
 **≈5.05 PFLOPS FP8, ≈2.525 PFLOPS BF16** — **unconfirmed, needs a real
 verification pass before Phase 2 depends on it.**
+
+---
+
+## Phase 1 — Rollout-side roofline
+
+### Mechanism: why rollout is decode-heavy, and what K-way prefix sharing actually does
+
+Two separate effects, not one — worth keeping distinct since it's easy to
+conflate them:
+
+1. **Root cause**: response length ≫ prompt length (R1's responses run
+   into the tens of thousands of tokens vs. a much shorter prompt) —
+   decode-heavy per request, independent of K entirely, same shape as
+   `decode_notes.md`'s original prefill-vs-decode argument (many
+   sequential decode steps dwarf one parallel prefill pass).
+2. **K-way prefix sharing amplifies, doesn't cause, the decode-heaviness**:
+   K completions share one prefill pass instead of K independent ones.
+   Savings = **(K−1)/K = 15/16 = 93.75%** of prefill's own cost avoided by
+   sharing — a clean, R-independent number, and the direct answer to
+   Phase 1's stated deliverable question.
