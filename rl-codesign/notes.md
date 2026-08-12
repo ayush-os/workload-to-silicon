@@ -85,3 +85,21 @@ policy update if uncorrected. Directly relevant since this project's
 workload reuses `moe-routing-notes.md`'s formulas (DeepSeek-style MoE +
 MLA) — not addressed by any of the six original reading-list papers.
 **Not yet scoped in or out — flagged for Phase 2/3.**
+
+### Decision 1: keep the reference model
+
+Settled by R1's own grounding, not a free design choice — GRPO's
+objective explicitly includes the KL term. **Kept.**
+
+Real wrinkle carried forward: the reference model is refreshed every 400
+steps, not frozen for the whole run — a periodic weight-copy event, same
+shape as one training→rollout sync, just far rarer (a footnote for Phase
+3, not a new axis).
+
+FLOPs shape: a single forward pass over each full generated response to
+get log-probs — **prefill-shaped** (parallel over sequence length), not
+decode-shaped like rollout's own generation. Gets its own line item in
+Phase 1's accounting, not folded into rollout.
+
+Placement: shares rollout's chip pool by default (both pure inference, no
+training state) unless something concrete pushes back on that later.
