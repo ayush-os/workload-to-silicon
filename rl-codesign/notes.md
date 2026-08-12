@@ -246,3 +246,54 @@ Smaller than the FLOPs-only shares — confirms decode's memory-bound
 regime makes its real wall-clock dominance even more extreme than raw
 FLOPs suggested, because decode's effective throughput is lower than
 prefill's near-peak compute-bound execution.
+
+### Key Findings, Phase 1
+
+1. **Rollout wall-clock is completely dominated by decode**, driven
+   specifically by KV-cache movement (not FFN weights) at realistic
+   response lengths — prefill is ≈0.001–0.017% of total rollout
+   wall-clock, 4–5 orders of magnitude below decode.
+2. **Mechanism chain**: response length ≫ prompt length (decode-heavy by
+   construction, independent of K) → K-way prefix sharing further shrinks
+   prefill's already-small share (93.75% savings, R-independent) →
+   decode's own accumulated cost is quadratic-dominated in R past
+   R\*≈7,865 (growing KV cache, the standard mechanism, already an open
+   thread from `decode_notes.md`) → converting FLOPs to real wall-clock
+   via the roofline (decode memory-bound, prefill compute-bound) makes the
+   dominance more extreme still, because cache-read bytes — not FFN
+   weights — become decode's largest wall-clock cost term at long R.
+3. **Sensitivity note, deliberately not chased further**: the N=640
+   cross-prompt batching assumption is load-bearing for the exact decode
+   number, but the qualitative conclusion is robust to a wide margin
+   (would need something like a 1,000×+ swing to flip it) — a K=16-alone
+   sensitivity run would also be measuring the wrong thing (isolated
+   non-batched decode, not a real deployment scenario any RL system would
+   actually run), so deliberately not run. Matches this repo's own scope
+   discipline (`disagg_and_placement_notes.md`'s "cut it and flag it"
+   convention).
+4. **Open flag, real but unaddressed**: Miles' "Rollout Routing Replay"
+   issue (MoE routing decisions drifting between rollout and training
+   recomputation) is a real mechanism specific to this project's MoE+MLA
+   workload, not covered by any of the six original reading-list papers,
+   and not yet scoped in or out. Needs an explicit decision in Phase 2 or
+   3.
+
+---
+
+## Open Threads / Flags carried into Phase 2+
+
+- **TPU 8i's real BF16 peak is unconfirmed** — only a provisional
+  estimate (≈2.525 PFLOPS, via the halving-per-precision-step pattern from
+  sibling chip TPU 8t) exists. Source a real number before Phase 2's
+  training-side FLOPs depend on it.
+- **P=1,024 (prompt length) is this project's own assumption**, not
+  sourced from R1 or any primary source — flagged, revisit if a real
+  number surfaces.
+- **Rollout Routing Replay / MoE-routing-drift** (from Miles) — real,
+  workload-specific mechanism not in the original spec's reading list.
+  Decide explicitly in/out during Phase 2 or 3, don't let it silently fall
+  through the cracks.
+- **N≈640 realistic decode batch size** carried forward from disagg's own
+  HBM-capacity grounding — same chip, same model, so the reuse is
+  legitimate, but confirm it still holds if Phase 2/3 changes any
+  deployment assumptions (e.g. a different EP-group size).
