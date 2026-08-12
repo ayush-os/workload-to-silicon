@@ -188,3 +188,61 @@ after GQA"). This project is the first in the repo where a *single
 request's own response length* crosses into that regime without needing
 large batch or long prompt context to get there — worth a scope-note
 pointer back to that open thread, not fresh territory.
+
+### Bytes and wall-clock time
+
+Prefill is compute-bound, decode is memory-bound — the established
+convention throughout this repo (`decode_notes.md`, disagg's dense/MoE
+work) — confirmed, not assumed, for this project's own numbers.
+
+**Prefill**: at a single isolated prompt (batch=1), AI comes out *below*
+TPU 8i's ridge point (≈1,174 FLOPs/byte, = 10.1 PFLOPS / 8.6 TB/s) — would
+flip prefill memory-bound, contradicting every prior finding in this
+repo. Resolved: crossover only needs **B≈3 concurrent prompts** batched
+together to clear the ridge (weight bytes amortize across the batch,
+FLOPs scale linearly with B) — trivially satisfied by any real rollout
+(R1 itself batches 32 prompts/step). Compute-bound confirmed, not just
+assumed.
+
+**Prefill wall-clock = 46,683,610,152,960 FLOPs / 10.1 PFLOP/s ≈ 4.62 ms.**
+
+**Decode bytes — two real modeling forks, not pure formula reuse:**
+
+1. FFN bytes depend on *cross-prompt* batch size (how many distinct
+   experts get touched scales with total concurrent decode batch, not
+   just K). Reused disagg's real, HBM-capacity-grounded **N=640**
+   (8-device EP group, 258.05 MB/device/layer FFN bytes, 99.43%
+   expert-table coverage) rather than re-deriving a new saturation curve —
+   justified because R1's own real minibatch (32×16=**512**) is close
+   enough in scale to 640 for the same near-saturated regime to plausibly
+   apply. **Flagged assumption, not free reuse.**
+2. KV-cache read bytes — a term FLOPs never needed. Each of the ~640
+   concurrent requests reads its own MLA cache (576 elements/token/layer)
+   every step. Modeled at steady-state: average context length ≈ P + R/2
+   across the batch (matching disagg's own steady-state-averaging
+   convention, not per-request staggering).
+
+Per-device decode bytes/layer = 108.17 MB (attention weights, replicated
+across the EP group) + 258.05 MB (FFN shard, N=640) + cache (80
+requests/device × avg context × 288 bytes):
+
+| | R = 8,192 | R = 65,536 |
+|---|---|---|
+| Cache bytes/layer/device | 117.96 MB | 778.57 MB |
+| Total bytes/layer/device | 484.18 MB | 1,144.78 MB |
+| Total bytes/device (×60 layers) | 29.05 GB | 68.69 GB |
+| Time/decode-step (÷8.6 TB/s) | 3.378 ms | 7.987 ms |
+| **Decode wall-clock (×R steps)** | **27.67 s** | **523.5 s** |
+
+**Combined:**
+
+| | R = 8,192 | R = 65,536 |
+|---|---|---|
+| Prefill | 4.62 ms | 4.62 ms |
+| Decode | 27,672 ms | 523,536 ms |
+| **Prefill's share of wall-clock** | **≈0.0167%** | **≈0.00088%** |
+
+Smaller than the FLOPs-only shares — confirms decode's memory-bound
+regime makes its real wall-clock dominance even more extreme than raw
+FLOPs suggested, because decode's effective throughput is lower than
+prefill's near-peak compute-bound execution.
