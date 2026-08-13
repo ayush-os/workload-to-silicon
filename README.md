@@ -1,20 +1,21 @@
 # Workload → Silicon: Hardware & System Codesign for LLM Inference
 
-Three self-directed codesign studies — single-chip attention microarchitecture, multi-chip MoE routing, then disaggregated serving + memory-hierarchy placement — every prediction hand-derived and logged *before* being checked against a tool, real hardware, or the literature.
+Four self-directed codesign studies — single-chip attention microarchitecture, multi-chip MoE routing, disaggregated serving + memory-hierarchy placement, then RL post-training rollout/training resource codesign — every prediction hand-derived and logged *before* being checked against a tool, real hardware, or the literature.
 
-**Stack:** Timeloop/Accelergy, Gemmini (Chipyard), Verilator, ASTRA-sim, hand-built SimPy discrete-event simulator · **Workloads:** Llama 3-70B attention (GQA), prefill and decode · DeepSeek-V2 MoE routing (multi-chip, 8-way EP) · disaggregated prefill/decode serving for both models
+**Stack:** Timeloop/Accelergy, Gemmini (Chipyard), Verilator, ASTRA-sim, hand-built SimPy discrete-event simulator, hand-derived roofline (no simulator) · **Workloads:** Llama 3-70B attention (GQA), prefill and decode · DeepSeek-V2 MoE routing (multi-chip, 8-way EP) · disaggregated prefill/decode serving for both models · GRPO RL post-training (rollout vs. training, colocated vs. disaggregated architectures) on TPU 8t/8i
 
 - **The compute/memory-bound regime is a design decision, not a workload property**: the same prefill attention workload hits **AI = 8,192 FLOPs/byte** (compute-bound, fused) or **AI ≈ 126** (memory-bound, unfused) against a TPU v5e ridge point of **≈480.5** — the fusion decision alone swings the regime **65×**.
 - **Built a discrete-event simulator from scratch and found the real system bottleneck no closed-form derivation had surfaced**: prefill's fixed compute ceiling (**~4,138 req/s** across a 29-machine pool), not decode capacity or the KV-cache pool — decode occupancy self-limits and plateaus under 2.2× more load while prefill wait time grows unboundedly. Caught **3 real implementation bugs** in the process, including a race condition that could have silently over-admitted requests past the decode cap.
 - **The dense-vs-MoE disaggregation ratio depends almost entirely on context length, not architecture**: held at the same context, dense (**5.82:1** prefill:decode chips) and MoE (**5.97:1**) land within 2.6% — two real, opposing architectural effects (sparse FFN, MLA attention) that happen to cancel. Stretch to DeepSeek-V2's real 163,840-token deployment cap and the same two effects stop canceling: the ratio collapses to **1.31:1**, recovered back to 5.97:1 only after proving 22 experts fit permanently SRAM-resident (a **4.5× throughput** jump).
 - **The same "just quantize it" lever is decisive for the MoE routing project below and structurally powerless for decode attention** — decode's regime-flipping crossover would need **~0.27 bits/element**, not a realizable format, vs. MoE's real crossover at **≈2.5 bytes/element** (FP8/BF16). Same mechanism, opposite verdict: purely a function of how large a margin each workload's numerics lever has to close (~5–7× for MoE, 30–240× for decode), not any difference in how the lever works.
 - **Derived DeepSeek-V2's real dispatch/combine traffic** against the paper's actual device-limited routing mechanism (not the textbook formula) and proved the workload sits on a **hard, imbalance-proof compute-bound floor** (~21,065 FLOPs/byte, ~5× the TPU 8i ICI ridge point) — no routing skew, however severe, can flip it comms-bound. Only a numerics choice (dispatch precision) can.
+- **RL post-training codesign found colocated beats disaggregated at every chip budget tested (168→320 chips), margin shrinking 4.5×→1.12× but never crossing over** — the opposite of the field's own claimed tradeoff (disaggregation wastes compute small-scale, colocation stalls large-scale), a real result for this model's own lopsided rollout:train FLOPs ratio, explicitly conditioned on fully on-device optimizer state.
 
 ---
 
-## Methodology (shared across all three projects)
+## Methodology (shared across all four projects)
 
-Every phase follows the same loop: **hand-derive a prediction → validate against a tool, real hardware, or a hand-built simulator → explain every gap mechanistically.** Applied first at the single-accelerator level (PE array, dataflow, scratchpad), then one level up at the system level (interconnect topology, bandwidth, buffering), then one level further at the memory-hierarchy/serving level (SRAM vs. HBM residency, prefill↔decode handoff) — where no off-the-shelf tool fit, so the third project hand-builds its own discrete-event simulator rather than forcing an ill-fitting tool. Scope is treated as a first-class, discussable decision throughout, not just something to push through — several phases across all three projects were deliberately narrowed, skipped, or reversed once their marginal learning value or real feasibility was checked, with the reasoning kept on record rather than scrubbed (see each writeup's scope/reversal sections).
+Every phase follows the same loop: **hand-derive a prediction → validate against a tool, real hardware, or a hand-built simulator → explain every gap mechanistically.** Applied first at the single-accelerator level (PE array, dataflow, scratchpad), then one level up at the system level (interconnect topology, bandwidth, buffering), then one level further at the memory-hierarchy/serving level (SRAM vs. HBM residency, prefill↔decode handoff) — where no off-the-shelf tool fit, so the third project hand-builds its own discrete-event simulator rather than forcing an ill-fitting tool — then one level further still at the RL training-loop level (rollout vs. training resource allocation, colocated vs. disaggregated architectures), where the fourth project stays with pure hand-derivation throughout, no tool or simulator fitting the question at all. Scope is treated as a first-class, discussable decision throughout, not just something to push through — several phases across all four projects were deliberately narrowed, skipped, or reversed once their marginal learning value or real feasibility was checked, with the reasoning kept on record rather than scrubbed (see each writeup's scope/reversal sections).
 
 ---
 
@@ -125,6 +126,30 @@ Extends the stack one level further: from single-accelerator microarchitecture, 
 Full writeup (all phases, cross-phase synthesis, open threads):
 [`disagg_and_placement_notes.md`](disagg_and_placement_notes.md). Simulator
 code and sweep results: [`disagg-and-placement-sim/`](disagg-and-placement-sim/).
+
+---
+
+## RL Post-Training Codesign → [`rl_codesign_notes.md`](rl_codesign_notes.md)
+
+**Stack:** hand-derived roofline (FLOPs/bytes/wall-clock, no simulator) · **Workload:** GRPO RL post-training (DeepSeek-R1-style) on DeepSeek-V2 (236B/21B, MoE+MLA), rollout on TPU 8i (inference-optimized) and training on TPU 8t (training-optimized) — the first TPU generation split into two physically distinct chips
+
+Extends the stack one level further: from single-accelerator microarchitecture, to multi-chip interconnect, to memory-hierarchy/serving, to the RL training-loop level itself — how to split chips between generating rollouts (pure inference) and computing gradient updates (training), the live, unresolved debate in real RL post-training systems (HybridFlow's colocated resharding vs. RhymeRL/AReaL/StreamRL's disaggregated pipelining).
+
+- Derived rollout's real wall-clock cost and found it **dominates training by 2×–35×** depending on chip layout — driven by KV-cache read bytes, not FLOPs, with decode's own cost scaling **O(R²)**, not O(R), from the growing KV cache.
+- Found **activation recomputation is numerically forced, not optional**, at this project's response lengths (one MLA layer's attention-score activations alone are **12.7× an entire TPU 8t's HBM** at R=65,536), and derived Adam optimizer state as an independent **2.83 TB (≥13-chip) floor** with no recompute equivalent.
+- **Colocated beats disaggregated at every chip budget tested (168→320 chips)**, margin shrinking **4.5×→1.12×** but never crossing over — the opposite of the field's own claimed pattern — because disaggregated pays a fixed, mostly-idle 160-device training tax that colocated never pays. Explicitly conditioned on fully on-device optimizer state; this project's own anchor workload (R1) is known to violate that via CPU offloading.
+- Derived cross-pool weight-sync cost (**≈2.75 s**, real topology: no shared fabric between 8t/8i, Google's Jupiter DCN in between) and found it exceeds an entire training step's wall-clock by **3.4×** at short response lengths — then showed one step of staleness (the real-world default) fully absorbs it with **~43% margin**, and more staleness buys nothing further for this project's own numbers.
+
+| Phase | Focus | Status |
+|---|---|---|
+| 0 | Setup: reading list, reference-model decision, precision/hardware decision | ✅ done |
+| 1 | Rollout-side roofline (FLOPs, bytes, wall-clock, K-way prefix sharing) | ✅ done |
+| 2 | Training-side roofline (backward multiplier, optimizer state, GRPO critic-free saving, parallelism config) | ✅ done |
+| 3 | Colocated vs. disaggregated architecture comparison | ✅ done — colocated wins at every tested chip budget, conditioned on Decision 3 (optimizer offloading, out of scope) |
+| 4 | Staleness: throughput-vs-staleness tradeoff | ✅ done — one step of staleness is necessary and sufficient here; training-quality effects explicitly out of scope |
+| 5 | Cross-project synthesis | ✅ done — one optional close-the-loop substitution (real measured kernel throughput) scoped out and flagged, not performed |
+
+Full writeup (all phases, cross-phase synthesis, key takeaways, open threads): [`rl_codesign_notes.md`](rl_codesign_notes.md).
 
 ---
 
