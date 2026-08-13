@@ -15,10 +15,10 @@ section.
 **Phase 0, Phase 1, and Phase 2 are complete. Phase 3 is well underway**
 — the shared rollout:train wall-clock/chip-ratio question is derived
 from multiple angles (mismatched, matched-chip, cross-chip-tax,
-throughput-balanced disaggregated), but the two remaining concrete
-pieces (weight-broadcast topology, sync-boundary transfer cost) and the
-final synthesis are not yet done. See "What's next" below for the exact
-four items to pick up.
+throughput-balanced disaggregated), and items 1–3 (weight-broadcast
+topology, sync-boundary transfer cost, colocated resharding) are now
+resolved this session too. See "What's next" below — the final
+synthesis (item 4) is the one remaining piece.
 
 ## What's done
 
@@ -180,38 +180,51 @@ substitute.
    actual TP ceiling — isn't sourced). Don't re-assert the strong version
    of this claim without addressing those two gaps first.
 
-## What's next: four concrete items
+## What's done this session: items 1–3, one item left
 
-1. **Disaggregated's weight-broadcast topology** (per `spec.md`): when
-   training finishes a step, updated weights need to reach every rollout
-   worker — point-to-point, broadcast, or tree? Reuse MoE's own
-   mesh-vs-switch topology reasoning (this repo's `moe-routing-notes.md`)
-   since broadcast-to-many-workers is a different traffic pattern than
-   MoE's dispatch or disagg's point-to-point KV handoff.
-2. **The FP4(8t)→FP4(8i) sync-boundary transfer cost itself** — pairs
-   directly with #1 (topology gives the pattern, this gives the time).
-   Ingredients already sourced: weight bytes ≈118 GB (236B params ×
-   0.5 B/param FP4), ICI bandwidth 19.2 Tb/s/chip. Still unconfirmed:
-   whether 8t/8i pods share the ICI fabric for this traffic at all (flag
-   in `notes.md`'s Open Threads), and whether the two chips' FP4 formats/
-   scaling conventions match byte-for-byte (don't assume).
-3. **Colocated resharding cost — scoped down, not a full derivation.**
-   The same-layout-on-8i alternative (found this session) avoids
-   weight-reshard entirely by paying the cross-chip tax instead, and
-   that's now the strongest colocated number in hand. Recommend noting
-   "different-layout colocated, real HybridFlow-style reshard cost" as a
-   flagged-but-deprioritized alternative rather than deriving it in full
-   — matches this project's own scope discipline, and the same-layout
-   variant is arguably the better answer already.
-4. **The actual comparison — Phase 3's real checkpoint.** Once #1–2 give
-   disaggregated's complete cost (chip ratio + broadcast + sync
-   transfer), synthesize: under what conditions (model size, cluster
-   size, rollout:train FLOPs ratio, R) does colocated vs. disaggregated
-   win? This is the deliverable `spec.md` actually asks for — everything
-   above is an input to it, not the answer itself. This is also where
-   the pool-size-ambiguity open item (above) gets resolved: match
-   colocated's N to whatever total chip budget the disaggregated
-   derivation settles on, for a fair comparison.
+**Items 1+2 resolved** (`notes.md`'s new "Weight-broadcast topology and
+sync-boundary transfer cost" subsection, end of Phase 3 section): 8t and
+8i confirmed to share **no fabric** (3D torus vs. Boardfly, no shared ICI
+— the earlier "candidate" 19.2 Tb/s ICI number does *not* apply
+cross-pool). Real path is Jupiter (Google's general DCN), 400 Gb/s/host.
+Single-link baseline transfer cost (fan-in + cross-pool + fan-out)
+**≈2.75 s** — headline finding: this exceeds training's own per-step
+wall-clock by **~3.4×** at R=8,192 (11% at R=65,536), a real, load-bearing
+cost, not a footnote. Architecture-tradeoff space also mapped (single
+link vs. parallel-matched-layout vs. parallel-mismatched-with-reshard) —
+single-link ≈2.75 s is the working default carried into item 4; faster
+options exist but are contingent on giving up disaggregated's
+independent pool-sizing or eating an unmodeled reshard cost (HybridFlow's
+own 70B-dense reshard numbers are the real anchor for how bad that could
+get). One methodological note recorded there too: an earlier pass
+mis-sourced Boardfly's Group size as 288 chips (a WebFetch conflation
+with TPU 8i's 288 GB HBM capacity) — caught, corrected to the real 32
+chips/Group (8 BBs × 4 chips), re-verified against the stated 1,152-chip
+pod total.
+
+**Item 3 resolved this session too** (`notes.md`'s new "Colocated
+resharding cost — scoped down, not derived" subsection): same-layout-on-
+8i (TP=2×EP=40=80 devices, both modes) means devices never move shards
+between modes at all — a genuinely zero-reshard transition, not just a
+cheap one, so no reshard cost gets added on top of the 3.76×/1.93×
+colocated ratios already carried forward. The different-layout
+alternative (real HybridFlow-style reshard, anchored to their own 70B-
+dense numbers: up to 36.4% naive, ~11.7s avg optimized, 78.2s worst case)
+is flagged as a deprioritized data point, not derived for this project's
+236B MoE scale — the same-layout answer already in hand is better, so
+deriving the alternative wouldn't change what's carried into item 4.
+
+## What's next: one remaining item
+
+1. **The actual comparison — Phase 3's real checkpoint.** Now that
+   disaggregated's complete cost is in hand (chip ratio + broadcast +
+   sync transfer, ≈2.75 s single-link default), synthesize: under what
+   conditions (model size, cluster size, rollout:train FLOPs ratio, R)
+   does colocated vs. disaggregated win? This is the deliverable
+   `spec.md` actually asks for — everything above is an input to it, not
+   the answer itself. This is also where the pool-size-ambiguity open
+   item (above) gets resolved: match colocated's N to whatever total chip
+   budget the disaggregated derivation settles on, for a fair comparison.
 
 ## Open threads to keep in view
 
@@ -238,8 +251,13 @@ ridge point ≈1,930 FLOPs/byte — all confirmed. No BF16 number exists for
 either chip (confirmed absent, not just unsourced — see Decision 2
 revision).
 
-Both chips: 19.2 Tb/s/chip ICI bandwidth (2× prior gen) — candidate
-number for Phase 3's weight-sync derivation, fabric-sharing unconfirmed.
+Both chips: 19.2 Tb/s/chip ICI bandwidth (2× prior gen) — **resolved,
+does not apply to the cross-pool weight-sync transfer** (8t/8i pods
+share no fabric; ICI is pod-internal only). Real cross-pool path is
+**Jupiter** (Google's general-purpose north-south DCN), **400 Gb/s/host**
+— see below. TPU 8i's own Boardfly topology: 4-chip Building Block (full
+mesh) → 32-chip Group (8 BBs, full mesh via copper) → 1,152-chip Pod (36
+groups, via OCS), 7-hop max diameter.
 
 **This session's Phase 3 numbers**: colocated-on-8i's parallelism config
 is **TP=2×EP=40 = 80 devices** (211.6 GB/216... i.e. /288 GB 8i budget,
@@ -248,6 +266,20 @@ is **TP=2×EP=40 = 80 devices** (211.6 GB/216... i.e. /288 GB 8i budget,
 running on 8i instead of native 8t: **2.50×** slower (2× from half the
 chips × 1.248× from 8i's lower FP4 peak). Weight bytes for the Phase 3
 sync-transfer derivation: **≈118 GB** (236B params × 0.5 B/param FP4).
+
+**Weight-broadcast topology + sync cost (this session, items 1+2)**:
+disaggregated's cross-pool weight sync, single-link baseline = fan-in
+(0.047 s, 8t-internal) + cross-pool (2.36 s, Jupiter @ 400 Gb/s) +
+fan-out (0.344 s, Boardfly @ 19.2 Tb/s/chip, 7-hop bound for N_r>32) ≈
+**2.75 s total**. Exceeds training's own per-step wall-clock by **~3.4×**
+at R=8,192 (11% at R=65,536) — real, load-bearing cost for item 4's
+synthesis, not a footnote. Faster architectures exist (parallel
+per-device links) but are contingent on either accepting N_r=N_t=160
+(collides with independent pool-sizing) or an unmodeled reshard cost
+(HybridFlow's 70B-dense numbers are the anchor for how bad that could
+get). Single-link ≈2.75 s is the working default. Full derivation,
+including the Boardfly Group-size correction (32 chips, not 288 — a
+WebFetch/HBM-capacity conflation caught mid-session), in `notes.md`.
 
 ## Not done, deliberately
 
