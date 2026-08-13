@@ -947,6 +947,42 @@ distribution aren't sourced here).
   TP×EP activation-memory rederivation were all similarly flagged and not
   chased).
 
+**Correction, caught while setting up item 4 — the balance-point N_t
+values above are infeasible.** The sweep solved `train_time(N_t) =
+rollout_time(N_r)` purely for wall-clock equality, without checking it
+against Phase 2's own training capacity floor (**≥160 devices on native
+8t**, TP=4×EP=40, just to *fit* weights+gradients+optimizer state — a
+hard requirement, not a speed consideration). The balance-point N_t
+values above (as low as ≈5) don't have anywhere near enough combined HBM
+to hold the model; they solve the equation correctly but aren't
+buildable systems.
+
+**Corrected picture**: since disaggregated keeps training on its native
+chip (8t, avoiding the cross-chip tax — the whole point of
+disaggregating), N_t is **fixed at 160**, not a free variable. At
+N_t=160, train_time is fixed too: **0.80 s (R=8,192) / 24.86 s
+(R=65,536)** (Phase 2/3's own numbers). Compare against rollout's own
+*best-possible* wall-clock — its structural floor as N_r→∞ (EP-only,
+TP=1, matching this sweep's own convention): **≈6.18 s / ≈49.46 s**.
+Training's fixed floor-time is smaller than rollout's floor in both
+cases (0.80 < 6.18, 24.86 < 49.46) — **training can never be the
+bottleneck in disaggregated, at any N_r, at either R anchor**, once the
+real capacity constraint is respected. The ratios tabulated above are
+still useful as the *hypothetical, capacity-unconstrained* balance
+point, but not as a buildable chip-ratio recommendation.
+
+**Practical consequence for item 4**: N_t=160 is a fixed cost;
+N_r is the only real free variable. Disaggregated's real per-step-
+equivalent cost, with sync verified hideable within a single pipeline
+cycle (checked explicitly — sync's 2.75 s stays under 45% of cycle time
+even at rollout's own structural floor, comfortably inside the 1-step-
+staleness slack every real system in this space already uses), is:
+
+```
+disagg_cost(N_r) = max(rollout_time(N_r), train_time(160))
+disagg_total_chips(N_r) = 160 + N_r
+```
+
 **Session's working synthesis, stated at the right confidence level**:
 rollout:training chip ratio (disaggregated) is >1 in every configuration
 tested — not a proven universal law, but true across everything checked
