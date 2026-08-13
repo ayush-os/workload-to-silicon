@@ -19,10 +19,25 @@ lopsided rollout:train FLOPs ratio (236B MoE, R∈{8192,65536}) — not
 asserted as a universal law. Full derivation in `notes.md`'s Phase 3
 section, "Item 4: the colocated-vs-disaggregated comparison."
 
+**Critical condition on finding (2), Decision 3**: this result assumes
+fully on-device optimizer state for both architectures. Optimizer state
+is ~70% of the byte footprint driving training's 160-device capacity
+floor — the exact mechanism behind colocated's win. Real systems
+(including this project's own anchor workload, R1) use CPU optimizer
+offloading, which would shrink that floor and plausibly narrow or
+reverse the result. Explicitly out of scope for quantitative derivation
+(would require host-device bandwidth + CPU Adam throughput — a fourth
+new research axis this project hasn't built infrastructure for), but
+**not silently ignored** — read finding (2) as "colocated wins, given
+neither architecture offloads optimizer state," not as an unconditional
+recommendation. Full reasoning in `notes.md`'s "Decision 3" note.
+
 **Phase 0, 1, and 2 are complete, and Phase 3's checkpoint is now met**
 — both architectures' cost models are derived, and item 4 gives a
 stated, mechanistically-explained answer for which wins under which
-conditions, per `spec.md`'s own checkpoint language.
+conditions, per `spec.md`'s own checkpoint language. A few loose ends
+are flagged but deliberately not chased (see "What's done: item 4"
+below and "Open threads").
 
 ## What's done
 
