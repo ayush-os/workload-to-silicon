@@ -2,7 +2,7 @@
 
 Third of three sequential codesign studies in this repo, one level up from both:
 attention ([`prefill_notes.md`](prefill_notes.md)/[`decode_notes.md`](decode_notes.md))
-derived single-chip microarchitecture; MoE routing ([`moe-routing-notes.md`](moe-routing-notes.md))
+derived single-chip microarchitecture; MoE routing ([`moe_routing_notes.md`](moe_routing_notes.md))
 derived multi-chip interconnect topology. This project is the memory-hierarchy layer
 underneath both: given a serving system split into prefill and decode pools, what
 actually lives in SRAM vs. HBM vs. gets transferred, and how does data move as
@@ -159,7 +159,7 @@ replication structurally eliminates Phase 3's hot-expert-residency question
 (if every chip holds every expert, there's no placement decision left) —
 the same "eliminates the question this project exists to study" failure mode
 already caught once for the intermediate KV pool. Reversed to **expert-parallel
-sharding, 8-device EP group** (reusing `moe-routing-notes.md`'s own topology —
+sharding, 8-device EP group** (reusing `moe_routing_notes.md`'s own topology —
 "one decode machine" redefined as one 8-chip group for the MoE leg only).
 
 **Per-device bytes moved, decomposed**: at N=640/EP-group (see grounding
@@ -628,7 +628,7 @@ whole system is prefill's fixed compute ceiling, not decode or the pool.
 - **A real per-device population/N model for MoE routing under non-uniform
   device assignment** — this project's entire MoE-routing-sparsity analysis
   assumes device-to-expert assignment is uncorrelated with popularity
-  (`moe-routing-notes.md`'s own sourced deployment fact); real load-balanced
+  (`moe_routing_notes.md`'s own sourced deployment fact); real load-balanced
   placement would break the clean 1/8th-scaling symmetry §2b.5 relies on.
 
 ---

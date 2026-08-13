@@ -66,7 +66,7 @@ Full writeups: [`prefill_notes.md`](prefill_notes.md) (all four sub-phases, cros
 
 ---
 
-## MoE Routing System Codesign → [`moe-routing-notes.md`](moe-routing-notes.md)
+## MoE Routing System Codesign → [`moe_routing_notes.md`](moe_routing_notes.md)
 
 **Stack:** ASTRA-sim (setup pending) · **Workload:** DeepSeek-V2 MoE (236B total / 21B activated) — 160 routed + 2 shared experts, top_k=6 capped at M≤3 devices, MLA attention, 8-way expert-parallel deployment on TPU 8i (FP4, Boardfly interconnect)
 
@@ -86,7 +86,7 @@ Extends the same loop one level up the stack: from single-accelerator microarchi
 | 4 | Synthesis: on-chip SRAM (attention) vs. interconnect (MoE) budget tradeoff | ✅ done |
 
 Full writeup (workload, hypothesis, ASTRA-sim results, cross-project
-synthesis, key takeaways): [`moe-routing-notes.md`](moe-routing-notes.md).
+synthesis, key takeaways): [`moe_routing_notes.md`](moe_routing_notes.md).
 
 ---
 
