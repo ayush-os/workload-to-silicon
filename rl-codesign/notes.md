@@ -593,6 +593,368 @@ sourced.
 
 ---
 
+## Phase 3 — Colocated vs. disaggregated architectures (in progress)
+
+### Rollout:train wall-clock split, per full RL step
+
+Shared input both sub-architectures need (colocated's wall-clock split,
+disaggregated's chip-ratio methodology) — computed once, first, before
+picking either side.
+
+**Rollout wall-clock (full step, not single-request)**: Phase 1's
+per-request numbers scaled to the real batch. Prefill: 32 distinct
+prompts (not shared via K-sharing, which only applies *within* a
+prompt's K=16 completions), batched — still compute-bound (batch≫B≈3
+threshold), wall-clock scales linearly with total FLOPs so 32×4.62ms ≈
+147.9 ms. Decode: all 512 completions run concurrently in one wave (≤
+N=640 capacity), so the full-step decode wall-clock **equals** the
+single-request number already derived — no rescaling needed.
+
+| | R=8,192 | R=65,536 |
+|---|---|---|
+| Prefill (32 prompts) | 147.9 ms | 147.9 ms |
+| Decode | 27.67 s | 523.5 s |
+| **Rollout wall-clock/step** | **≈27.82 s** | **≈523.65 s** |
+| Prefill's share | 0.53% | 0.028% |
+
+**Training wall-clock (full step)**: no formula to reuse wholesale —
+training's forward pass is **prefill-shaped over the full sequence**
+(same mechanism Decision 1 already established for the reference
+model's log-prob pass), so Phase 1's `Prefill/layer(seq)` formula is
+reused directly, evaluated at **seq = P+R** (not just P — training
+needs gradients through the whole generated response), ×60 layers, ×512
+(real batch), then ×4 (Phase 2's forced-recomputation multiplier, not a
+generic 3×/8ND estimate).
+
+```
+forward_flops_per_layer(S) = 675,938,304·S + 81,920·S²,  S = P+R
+training_step_flops = 4 × 60 × 512 × forward_flops_per_layer(P+R)
+wall_clock = training_step_flops / (160 devices × 12.6 PFLOPS/chip)
+```
+
+| | R=8,192 (S=9,216) | R=65,536 (S=66,560) |
+|---|---|---|
+| Forward FLOPs/seq (×60 layers) | 7.912×10¹⁴ | 2.447×10¹⁶ |
+| Forward FLOPs, batch=512 | 4.051×10¹⁷ | 1.253×10¹⁹ |
+| Training step FLOPs (×4) | 1.6205 EFLOPs | 50.125 EFLOPs |
+| **Training wall-clock/step** | **≈0.804 s** | **≈24.86 s** |
+
+**Compute-bound verified, not assumed** (same discipline as Phase 1's
+prefill check): AI = FLOPs/device ÷ bytes/device (weight reads,
+~3× per step for fwd+bwd+recompute-forward) comes out to 637,573
+FLOPs/byte (R=8,192) and 19,721,679 FLOPs/byte (R=65,536) — both far
+above TPU 8t's ≈1,930 ridge point. Training is solidly compute-bound at
+this batch/sequence scale, consistent with Phase 2's activation-
+recomputation finding (recomputation trading memory capacity for extra
+FLOPs is itself evidence compute is the cheap resource here).
+
+### E2E per RL step and the rollout:train ratio
+
+| | R=8,192 | R=65,536 |
+|---|---|---|
+| Rollout | 27.82 s | 523.65 s |
+| Training | 0.80 s | 24.86 s |
+| **Ratio (rollout:train)** | **≈34.6 : 1** | **≈21.1 : 1** |
+
+**Rollout dominates wall-clock at both ends — genuinely non-obvious
+given training carries the 4× recomputation penalty and rollout is
+"only" memory-bound**: rollout is R *sequential* memory-bound decode
+steps; training is one large parallel compute-bound pass spread across
+160 chips at once — the parallelism gap outweighs the FLOPs-multiplier
+penalty.
+
+**Does the ratio ever cross over as R grows? No — it asymptotes to
+≈16.1×, never reaching parity.** Both wall-clocks pick up a
+quadratic-in-R term at large R, from the *same* underlying mechanism
+(full attention/cache read over a context that grows with R): rollout's
+KV-cache-read bytes (`11,520·R` term inside the bytes/layer/device
+formula, verified by reconstructing it from Phase 1's own published
+table values) and training's `81,920·S²` attention-score compute term
+(S≈R at large R). Since both are O(R²), their ratio converges to the
+**ratio of the two quadratic coefficients**, not to 1:
+
+```
+decode asymptotic coefficient (wall-clock/R²):  8.037e-08
+train  asymptotic coefficient (wall-clock/R²):  4.993e-09
+ratio → 16.096
+```
+
+Verified numerically out to R=10¹⁰ — ratio decreases monotonically from
+34.6 (R=8,192) through 21.1 (R=65,536) and flattens at 16.10 by
+R≈10⁷, never dropping further. The 34.6→21.1→16.1 decrease is the
+non-quadratic terms (rollout's fixed per-step weight-byte floor,
+training's linear-in-S term) becoming relatively negligible as R grows
+— not a sign of convergence toward crossover.
+
+**Caveat, since revised below**: 16.1× is a property of *this specific,
+mismatched device split* (160 chips for training, EP=8/8-device rollout
+group) — it answers a **disaggregated**-flavored question (each phase
+gets its own independently, capacity-derived pool size — real for
+disaggregated systems, which do split unevenly on purpose), not a
+colocated one (single shared pool, same chip count both modes). Treating
+16.1× as "the" rollout:train dominance number would be wrong — see
+below.
+
+### Matched-chip (colocated) comparison — the 16.1× number was the wrong question
+
+Colocated reshards the *same* pool between rollout- and training-mode,
+so both phases must run at the same N. Training's ≥160-chip capacity
+floor (Phase 2) forces N≥160 for the whole pool — meaning rollout also
+gets up to 160 chips during its phase, not just the 8 it was
+independently sized for. Recomputing rollout's decode wall-clock at
+EP=160 (bytes/layer/device terms — cache, FFN — scale as 8/EP; the
+attention-weight term, 108.17 MB, is *replicated* across the EP group
+and doesn't shrink with EP width at all, same structural issue that
+forced TP into training's own solution):
+
+| | R=8,192 | R=65,536 |
+|---|---|---|
+| Rollout @ EP=160 (prefill+decode) | 7.41 s | 73.31 s |
+| Training @ 160 devices | 0.80 s | 24.86 s |
+| **Ratio** | **9.2 : 1** | **2.95 : 1** |
+
+Down from 34.6:1/21.1:1 — matching chip counts closes most of the gap.
+But EP-widening alone only gets 3.81×/7.15× speedup from a 20× chip
+increase (8→160), not 20× — bounded by the replicated-attention floor
+(≈6.18s/49.46s as EP→∞). This is a genuine crossover-enabling change:
+at EP=160, decode's own asymptotic (R→∞) quadratic coefficient
+(4.02e-9) is now *smaller* than training's fixed one (4.99e-9) — unlike
+the mismatched case, there **is** a real crossover here, at **R≈1,000,000**
+(bisected numerically). Heavily caveated: ~15× beyond this project's own
+R=65,536 anchor, assumes rollout gets no TP (only wider EP), and assumes
+N=640 concurrent-request capacity holds unchanged at EP=160 — not
+load-bearing for any real conclusion at this project's actual R range,
+but a real mathematical consequence worth recording.
+
+### Sensitivity to rollout's own parallelism layout — the magnitude is not a single number
+
+EP=160-alone isn't the only rollout layout available at 160 chips.
+Tested against training's own TP=4×EP=40 split (mirroring training's
+exact layout) and a scaled-up TP=4×EP=160 (640 chips, both sides). Byte
+scaling rule (matches Phase 2's own confirmed pattern): **TP shards
+attention weights only** (independent of EP), **EP shards FFN/expert
+weights only** (independent of TP) — cache term's TP-sensitivity is
+unconfirmed (MLA's cache is attention-adjacent, plausibly TP-shardable,
+but no source pins this down), so both conservative (cache: EP-only) and
+optimistic (cache also shards with TP) variants computed.
+
+| Config | Devices | Ratio @ R=8,192 | Ratio @ R=65,536 |
+|---|---|---|---|
+| EP=160 only | 160 | 9.21:1 | 2.95:1 |
+| TP=4×EP=40 (matches training) | 160 | 7.45:1 | 4.32:1 |
+| TP=4×EP=40, optimistic (cache shards w/ TP) | 160 | 6.20:1 | 2.17:1 |
+| TP=4×EP=160, both sides | 640 (each) | 13.77:1 | 5.83:1 |
+
+**Three findings, more load-bearing than any single ratio**:
+
+1. **Rollout dominates in every configuration tested — ratio never below
+   ~2:1.** Direction is robust; magnitude isn't (2.2×–13.8× range).
+2. **Optimal rollout layout is R-dependent, not fixed**: at R=8,192,
+   TP=4×EP=40 beats EP=160-alone (attention's fixed floor is a bigger
+   fraction of a smaller total, worth sharding via TP); at R=65,536 it
+   flips (cache dominates so heavily that EP-width for spreading it
+   matters more than shrinking the now-relatively-small attention term).
+   No single best rollout parallelism strategy holds across this
+   project's own two R anchors.
+3. **Adding proportionally more chips to both sides doesn't preserve the
+   ratio — it widens it in training's favor** (7.45→13.77 at R=8,192
+   going 160→640 devices, same TP:EP ratio). Training is ideal
+   compute-bound strong-scaling (no floor, clean 4× speedup from 4×
+   devices). Rollout has structural floors (whatever EP/TP don't reach)
+   that cap how much it benefits from added parallelism. "Just add more
+   hardware to both" does not equalize rollout and training — it makes
+   training pull further ahead.
+
+**Working conclusion for Phase 3's colocated wall-clock split**: rollout
+dominates training's wall-clock by roughly 2×–14× depending on
+parallelism layout and R, direction robust, magnitude genuinely
+sensitive to config — not a single clean number the way Phase 1/2's
+findings were. The disaggregated-style 16.1× floor (mismatched pools,
+EP=8 vs 160) remains valid as an input to disagg's own chip-ratio
+methodology (each phase's independently-sized pool), just not as "the"
+colocated dominance number.
+
+**Not modeled, flagged**: K-way prefix sharing (Phase 1's 93.75% prefill
+saving) is *not* reused for training's forward — each of the 512
+completions gets its own independent backward graph; sharing prefix
+activations across a K-group during backward is a real technique but
+adds real complexity (gradient accumulation through a shared subgraph)
+not derived here. Also assumes **DP=1** (160 chips = the entire step,
+no additional data-parallel replicas) — Phase 2 only established the
+per-replica footprint, DP degree was never decided.
+
+### Colocated on a single physical chip — the 8t/8i heterogeneity finding
+
+**Colocated fundamentally needs one physical chip type, not just matched
+parallelism degrees.** Matching TP/EP layout between modes (e.g. same
+TP=4×EP=40 for both) removes the *weight-reshard* cost — devices sit at
+the same coordinate holding the same shard in both modes, no all-gather
+needed. But it doesn't remove the deeper problem: training is modeled on
+TPU 8t, rollout on TPU 8i — **physically different silicon** (Decision
+2's revision), not two modes of one chip. HybridFlow's colocated pool
+works because GPUs are homogeneous; TPU 8t/8i isn't. So colocation
+forces a choice of *which* chip hosts both roles, and whichever role
+doesn't get its native chip pays a real, recurring (every step, not
+one-time) performance tax:
+
+- All on 8t: rollout pays (8t's 6.528 TB/s vs 8i's 8.6 TB/s bandwidth —
+  hurts decode, the bandwidth-bound term).
+- All on 8i: training pays (8i's 10.1 PFLOPS vs 8t's 12.6 PFLOPS peak —
+  hurts the compute-bound forward/backward).
+
+**Two options going forward, both real**: (a) a genuinely homogeneous
+chip capable of both roles (e.g. Blackwell) sidesteps this tradeoff by
+design — flagged as a real open thread, not pursued (would require
+sourcing new hardware specs and re-deriving this project's formulas on
+it, disproportionate scope for one branch of the comparison, and this
+project has stayed TPU-8i/8t-anchored throughout). (b) Pick one TPU chip
+and caveat the tax — **chosen: 8i**, because rollout dominates step
+wall-clock in every config tested, so keeping the dominant term native
+and taxing the minority term (training) minimizes total damage,
+vs. taxing the dominant term by choosing 8t.
+
+**Capacity re-check on 8i (288 GB/chip vs 8t's 216 GB) — training's
+device-count floor shrinks.** Same search as Phase 2's TP×EP grid, new
+budget:
+
+| TP | EP | devices | GB/dev | headroom |
+|---|---|---|---|---|
+| 1 | 40 | 40 | 285.4 | 2.6 GB — **rejected, knife-edge, no room for activations** |
+| 2 | 32 | 64 | 234.5 | 53.5 GB |
+| **2** | **40** | **80** | **211.6** | **76.4 GB — chosen, more margin than 8t's own 41GB** |
+
+**Colocated on 8i, TP=2×EP=40=80 devices, same layout both modes (no
+reshard, no cross-chip tax on the dominant term)**:
+
+| | R=8,192 | R=65,536 |
+|---|---|---|
+| Rollout | 7.537 s | 119.671 s |
+| Training (2.50× tax vs. native 8t/160dev — exactly 2× fewer chips × 1.248× lower peak) | 2.006 s | 62.035 s |
+| **Ratio** | **3.76 : 1** | **1.93 : 1** |
+| Rollout's share of step | 79.0% | 65.9% |
+
+Tightest colocated picture derived — down from the original 34.6×/21.1×
+mismatched estimate. Asymptotic check for this specific config: quad
+coefficient ratio ≈1.29 (still >1) — **no crossover** this time, unlike
+the EP=160-only-no-TP case's R≈10⁶ crossover. Different parallelism
+choice, different long-run behavior — reinforces that neither the
+16.1× floor nor any single asymptotic behavior is "the" answer; both are
+config-specific.
+
+### Pool-size ambiguity — N is a free variable, not derivable in isolation
+
+Training's capacity floor (≥80 devices on 8i, ≥160 on 8t) is a
+**minimum**, not a mandate — nothing stops a larger colocated pool, and
+since rollout dominates wall-clock, more chips seem like they should
+help rollout more. **They don't, in relative terms**: swept N from 80 to
+2,560 (various TP/EP splits, training on native 8t formula scaled to
+each N) — total wall-clock (rollout+train) monotonically improves with
+N (181.7s→20.1s at R=65,536), but the **ratio gets worse, not better**
+(3.76×→23.26× at R=8,192 across the same sweep). Training is ideal
+compute-bound strong-scaling (no floor); rollout has structural floors
+(whichever term TP/EP don't reach). So "minimize the gap" and "minimize
+total latency" are **different objectives that point in opposite
+directions** as N grows — there is no principled single N without either
+a hardware-budget constraint (never modeled in this project) or an
+external anchor. **Resolution**: match colocated's N to disaggregated's
+own total chip budget (below) rather than picking N in isolation.
+
+### Disaggregated chip-ratio — throughput-balance methodology
+
+**Real derivation, distinct from the earlier mismatched (8-vs-160)
+wall-clock comparison** — that number answered "what's the ratio at
+independently-capacity-chosen pool sizes," not "what ratio balances
+throughput." Disaggregated runs two *concurrent* pools (rollout
+generates step i+1 while training consumes step i), each on its own
+**native** chip — no cross-chip tax at all, a real structural advantage
+over colocated. Balance condition: `rollout_time(N_r) = train_time(N_t)`
+(train on native 8t, 12.6 PFLOPS) — so neither pool idles waiting on the
+other.
+
+**Starting from N_r=8** (the one real, disagg-sourced anchor, not
+arbitrary): balancing N_t comes out *smaller* than N_r —
+
+| R | rollout_time | N_t needed | ratio N_r:N_t |
+|---|---|---|---|
+| 8,192 | 27.82 s | 4.62 → 5 | 1.60:1 |
+| 65,536 | 523.65 s | 7.60 → 8 | 1.00:1 |
+
+Counter to naive intuition (bigger model → more training chips) —
+rollout is so much slower per-chip that a tiny training pool keeps pace.
+
+**Sweep across N_r (pure EP, TP=1) shows the ratio is not fixed — it
+climbs with N_r**:
+
+| N_r | ratio @ R=8,192 | ratio @ R=65,536 |
+|---|---|---|
+| 8 | 1.73 | 1.05 |
+| 32 | 2.91 | 1.35 |
+| 40 | 3.31 | 1.45 |
+| 80 | 5.27 | 1.95 |
+| 160 | 9.21 | 2.95 |
+
+**Real-world sanity check**: AReaL's own reported ratio is ~75%/25%
+(3:1) inference:training on a 512-GPU H800 cluster. Our derived ratio
+**crosses 3:1 right around N_r≈32–40 at R=8,192** — close convergence at
+a plausible scale, resolving what initially looked like a real
+discrepancy at N_r=8. At R=65,536, reaching the same 3:1 needs a much
+larger N_r (still only 2.95× at N_r=160) — **a new, real finding: longer
+responses need proportionally far more rollout chips to sustain the same
+inference:training balance**, because rollout's wall-clock grows
+quadratically with R while the *balance point* itself shifts outward.
+Best explanation for AReaL's own lower N_r-scale match: AReaL's models
+(1.5B–32B, Phase 0 reading) are far smaller than this project's 236B
+MoE workload, and likely used shorter responses than R1's 65,536-token
+late-training cap — both push toward AReaL needing comparatively fewer
+training chips. Directionally explained, not quantitatively verified
+(AReaL's own exact model size within their range and response-length
+distribution aren't sourced here).
+
+**Robust vs. config-dependent findings, worth keeping separate**:
+
+- **Robust** (holds in *every* tested config, independent of TP/EP
+  split): ratio **shrinks as R grows**, at fixed N_r/N. Both rollout's
+  bytes formula and training's FLOPs formula carry a quadratic-in-R term
+  from the same cause (attention/cache over growing context) — training's
+  own quadratic term keeps closer relative pace, narrowing the gap. True
+  for any fixed config, so it doesn't depend on resolving the TP-scaling
+  question below.
+- **Config-dependent, weaker** (verified only for TP-held-fixed sweeps):
+  ratio **widens as N grows**. This one's real mechanism is genuinely
+  more efficient training (chip-seconds constant, `FLOPs/peak`,
+  independent of N) vs. genuinely less efficient rollout (chip-seconds
+  `N×ro(N)` grows with N because rollout's speedup is sub-linear, capped
+  by whichever term isn't sharded). **Walked back a stronger claim**:
+  earlier framed as "training has no structural bottleneck ever,
+  rollout's efficiency decays toward a floor" — that's only established
+  for the *specific configs tested* (TP held fixed while EP widened).
+  Untested: whether scaling TP *proportionally* alongside EP removes
+  rollout's floor too. **Deliberately not chased** — even a clean
+  idealized-model answer wouldn't be trustworthy, since (a) this project
+  has never modeled TP/EP communication overhead (all-reduce/all-to-all)
+  anywhere, and high-TP is exactly where that cost would start to bind
+  in reality, and (b) DeepSeek-V2's real attention head count (the actual
+  ceiling on TP width) isn't sourced in this project — same open V2/V3
+  mismatch flagged since Phase 2. Matches this project's own "cut it and
+  flag it" discipline (selective recomputation, N=640 sensitivity, exact
+  TP×EP activation-memory rederivation were all similarly flagged and not
+  chased).
+
+**Session's working synthesis, stated at the right confidence level**:
+rollout:training chip ratio (disaggregated) is >1 in every configuration
+tested — not a proven universal law, but true across everything checked
+— and it **shrinks as R grows** (robust finding, holds regardless of
+parallelism split) while it **widens as pool size grows** (real, but
+tied to the untested/unmodeled TP-scaling-ceiling question, so held at
+lower confidence). Colocated's own number (rollout dominates 3.76×–9.2×
+depending on config, tightest at TP=2×EP=40/80-device/8i) is a separate,
+now well-triangulated finding from a different mechanism (the 8t/8i
+physical chip split forcing a cross-role tax), not directly comparable
+to the disaggregated ratio without matching total chip budgets first —
+still an open synthesis step (see `handoff.md`).
+
+---
+
 ## Open Threads / Flags carried into Phase 2+
 
 - ~~TPU 8i's real BF16 peak is unconfirmed~~ — **resolved**: no BF16
