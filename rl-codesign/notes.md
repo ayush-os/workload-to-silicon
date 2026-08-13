@@ -1262,6 +1262,49 @@ optimizer state" — not as an unconditional recommendation.
    configuration — not tested, the finding above is scoped to this
    project's own numbers, not a general refutation.
 
+**Decision 3: optimizer offloading — out of scope for quantitative
+derivation, resolved directionally, not left as a dangling caveat.**
+Made explicitly, Phase-0-style, rather than discovered reactively mid-
+synthesis (worth noting the difference — this same question surfaced
+through dialogue *after* the headline numbers above were already
+computed, which is exactly the failure mode this decision is meant to
+correct going forward: state scope boundaries up front, don't let them
+accumulate as caveats bolted onto a finished conclusion).
+
+*Why out of scope*: modeling this for real needs TPU 8t's host-device
+interconnect bandwidth (this project has never touched host-side
+anything — every number so far is accelerator-to-accelerator), CPU-side
+Adam compute throughput (a different hardware category entirely), and
+the prefetch/overlap strategy real offload systems use to hide that
+latency (comparable in complexity to the weight-sync topology work
+above). That's a fourth genuinely new research axis — `spec.md`'s own
+scope note already flags that two new axes (training-side memory in
+Phase 2, staleness in Phase 4) is already a full load, and warns
+explicitly against a third.
+
+*Why not silent, though*: the direction is derivable without the full
+derivation. Optimizer state is ~70% of the per-device byte footprint
+that sets N_t's capacity floor (12 of 16.5 bytes/param). Offloading it
+to host memory would shrink that floor toward the throughput-balance
+point — directly attacking the exact idle-capacity mechanism the
+colocated-wins finding rests on. **The headline finding above should be
+read as conditional on fully on-device optimizer state — an assumption
+this project's own anchor workload (R1) is known to violate** (Phase 2
+already noted R1's real training used CPU optimizer offloading). Not a
+minor caveat: this is plausibly the single biggest lever that could
+narrow or reverse the result, and it's a real, common production
+technique, not a hypothetical edge case.
+
+*Considered and rejected*: an "optimistic bookend" (assume offloading is
+free, N_t shrinks to the throughput-balance point, see who wins) was
+considered but rejected — it isn't actually a clean bound, since
+colocated's own capacity floor (80 devices, also driven substantially by
+on-device optimizer state) would plausibly shrink under the same
+assumption, requiring new unmodeled assumptions about colocated's
+response too. Two stacked idealizations don't bound the truth cleanly;
+they produce a number that looks more precise than it is. The
+directional statement above is the honest resolution.
+
 ---
 
 ## Open Threads / Flags carried into Phase 2+
