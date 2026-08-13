@@ -284,15 +284,49 @@ comparison" subsection. Key pieces, in the order they were derived:
   finding above is scoped to this project's numbers, not a general
   refutation of RLinf.
 
+## What's done: Rollout Routing Replay, resolved (last item closed)
+
+Flagged since Phase 0/Miles, deferred through Phase 1–2, closed out at
+the very end of this session. Mechanism: MoE routing can drift between
+rollout's engine and training's recomputed forward pass; replay fixes it
+by shipping rollout's actual routing choices to training. Bounded
+systems check (not a new axis, reused this project's own MoE
+conventions): routing metadata ≈1.48 GB (R=8,192) to ≈11.88 GB
+(R=65,536), assuming DeepSeek-V2's real top-6 routing (flagged
+assumption). Flows rollout→training — opposite direction from the
+weight sync. **Real finding worth remembering**: this is *not* hidden by
+full-duplex the way it first looked — training has a genuine dependency
+latency (T_meta) waiting on this data, unlike weight-sync which has slack
+by design (staleness). Checked against the real margin instead of
+assumed away: `T_meta + train_time` still clears `rollout_time` by a wide
+margin even at the tightest tested point (25.10s vs. 72.27s at N_r=160,
+R=65,536) — real latency, but small enough not to change steady-state
+throughput. Full reasoning, including the corrected-in-dialogue
+full-duplex argument, in `notes.md`.
+
+## What's next: Phase 4 (staleness)
+
+Phase 3's fallback checkpoint (`spec.md`) is met — Phases 1–3 stand
+alone as a complete artifact, and every open thread from Phases 0–3 is
+now either resolved or explicitly, deliberately scoped out (not just
+deferred). Phase 4 is a real addition, not a prerequisite. Per
+`spec.md`: derive the throughput-vs-staleness tradeoff (how much does
+allowing N steps of staleness reduce sync/wait time, using Phase 1–3's
+own throughput numbers), explicitly out of scope on whether staleness
+hurts training *quality* (real ML-research question, not
+systems-derivable — use AReaL's own reported staleness tolerance, η=4
+coding / η=8 math, as the empirical anchor rather than re-deriving it).
+
 ## Open threads to keep in view
 
-- **Rollout Routing Replay** (Miles' MoE-routing-drift fix) — real,
-  workload-specific, not yet scoped in or out. Decide during Phase 2 or 3.
 - **P=1,024 prompt length** is an unsourced assumption (Phase 1's own
   pick) — revisit if a real anchor turns up.
 - **N≈640 decode batch size** reused from disagg's own HBM-capacity
   grounding — re-verify if Phase 2/3 changes deployment assumptions (e.g.
   a different EP-group size).
+- **Colocated's own TP-floating-with-N**, the **N_r≈10,000 crossover**,
+  and **RLinf's claim at other model scales** — all flagged above, real
+  but deliberately not chased.
 
 ## Key numbers carried forward
 
