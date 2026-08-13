@@ -996,6 +996,129 @@ physical chip split forcing a cross-role tax), not directly comparable
 to the disaggregated ratio without matching total chip budgets first —
 still an open synthesis step (see `handoff.md`).
 
+### Weight-broadcast topology and sync-boundary transfer cost (disaggregated) — items 1+2
+
+**The question, precisely**: when training finishes a step, its updated
+weights (sharded across N_t devices, training's own parallelism layout)
+need to reach every rollout worker (sharded across N_r devices, rollout's
+own, generally different, layout) before rollout can generate with the
+new policy. Two sub-questions bundle together: what topology carries
+this traffic (point-to-point / broadcast / tree), and what does it cost
+in wall-clock time.
+
+**Real search pass, findings — 8t and 8i do not share a fabric.**
+Checked the primary Google Cloud TPU 8t/8i deep-dive directly (re-fetched
+twice, see methodological note below) plus independent corroboration
+(ServeTheHome writeup, a Jeff Dean tweet on the launch). Confirmed:
+
+- **TPU 8t**: retains **3D torus** topology, scales to 9,600 chips/
+  superpod, own **Virgo** scale-out fabric (east-west, TPU-to-TPU within
+  the 8t fleet — 47 Pb/s bisection bandwidth across 134,000+ chips).
+- **TPU 8i**: **Boardfly**, hierarchical — **4-chip Building Block** (full
+  mesh) → **8 BBs = 32-chip Group** (full mesh via copper) → **36 groups
+  = 1,152-chip Pod** (via Optical Circuit Switches), 7-hop max diameter
+  (down from 16 in a 3D torus at the same 1,024-chip scale). Internal
+  consistency check: 36 × 32 = 1,152, matches the stated pod total —
+  this is the check that caught the error below.
+- **No shared fabric or topology between 8t and 8i pods** — not
+  documented anywhere in the primary source. The only cross-pod hint:
+  8t racks reach "compute and storage services" via **Jupiter**, Google's
+  general-purpose north-south DCN, not ICI. Real, sourced per-host
+  bandwidth for the current Jupiter generation: **400 Gb/s/host**
+  (standard modern DCN NIC speed, from Google's own Jupiter-network
+  evolution writeup — not TPU-8t/8i-specific, but the right order of
+  magnitude, and the user's own "probably just standard ethernet"
+  intuition was right).
+- **Practical conclusion**: the 19.2 Tb/s/chip ICI number flagged
+  earlier as a "candidate" for this transfer does **not** apply — ICI is
+  pod-internal only (different topologies per chip type, not just
+  different pods). The real cross-pool hop is the much slower Jupiter
+  DCN link.
+
+**Methodological correction, worth recording explicitly**: an earlier
+pass of this derivation used "288 chips" for Boardfly's Group size,
+sourced from a WebFetch summary — this was wrong, a fetch-tool
+conflation with TPU 8i's real 288 GB HBM capacity (a different number,
+already used elsewhere in this project), not an actual topology figure.
+Caught by the user, re-verified via direct re-fetch + independent
+cross-check (36 groups × chips/group must equal the stated 1,152-chip
+pod total — 32 satisfies this, 288 does not by a wide margin). Real
+Group size is **32 chips** (8 BBs × 4 chips/BB), not 288. Lesson worth
+keeping: sanity-check any tool-summarized hierarchical count against a
+stated total before using it, especially when a suspiciously-similar
+number already exists elsewhere in the project.
+
+**Topology model, three legs:**
+
+1. **Training-side fan-in**: training's weights are sharded across 160
+   devices (TP=4×EP=40, Phase 2). For one egress chip to hold the full
+   118 GB payload before it can cross the pool boundary, the other 159
+   devices' shards (118 − 5.295 = **112.7 GB**) must be gathered onto it
+   first, over 8t's own fabric (3D torus/Virgo, not Boardfly — that's
+   8i-only). Bound by 8t's 19.2 Tb/s/chip ICI (best-case, no hop-count
+   model — unlike Boardfly, no sourced hierarchical breakdown exists for
+   8t at the 160-chip scale, flagged as a real gap, not chased further
+   since it's already a small term).
+2. **Cross-pool hop**: single Jupiter DCN link, 400 Gb/s.
+3. **Rollout-side fan-out**: Boardfly, from the one receiving chip to the
+   rest of the N_r-device rollout pool. Hop count depends on whether N_r
+   fits inside one 32-chip Group: **N_r=8 and N_r=32 fit (≈2 hops)**;
+   **N_r=40, 80, 160 — including the colocated-on-8i config (N_r=80) —
+   all exceed one Group** and need Pod-level OCS routing between groups,
+   not precisely characterized for partial-pod subsets. Conservative,
+   sourced fallback: the pod's own **7-hop max diameter**.
+
+**Transfer cost, single-link baseline** (weight payload 118 GB = 236B
+params × 0.5 B/param FP4, already sourced):
+
+| Leg | Bandwidth | N_r=80 (7 hops) | N_r=8/32 (2 hops) |
+|---|---|---|---|
+| Fan-in (8t, 112.7 GB) | 19.2 Tb/s/chip | 0.047 s | 0.047 s |
+| Cross-pool (118 GB) | 400 Gb/s | 2.36 s | 2.36 s |
+| Fan-out (8i, 118 GB) | 19.2 Tb/s/chip | 0.344 s | 0.098 s |
+| **Total** | | **≈2.75 s** | **≈2.46 s** |
+
+**Headline finding**: compared against Phase 3's own per-step wall-clocks
+(training 0.80 s / 24.86 s, rollout 27.82 s / 523.65 s at R=8,192/65,536):
+
+| Sync cost (2.75 s) as % of... | R=8,192 | R=65,536 |
+|---|---|---|
+| Training step | **≈344%** | ≈11% |
+| Rollout step | ≈9.9% | ≈0.5% |
+
+**At R=8,192, the weight-sync step alone costs over 3× the entire
+training step.** Not a rounding-error tax on disaggregated's design —
+at short response lengths, sync can be a bigger bottleneck than training
+itself. At R=65,536 it's comparatively negligible, since rollout so
+thoroughly dominates everything by then. Real, load-bearing addition to
+disaggregated's total cost model, not a footnote — must be included in
+item 4's synthesis, not assumed away.
+
+**Architecture is a real design choice here, not a fixed cost — three
+points on a tradeoff curve, not one number:**
+
+| Architecture | Cross-pool time | What it costs |
+|---|---|---|
+| **1 link, gather→send→broadcast** (baseline above) | 2.36 s | Simple, one physical link. Serializes all 118 GB through one pipe. |
+| **N_t=160 parallel links, matched layout** | 118GB/160 ≈ 0.106 s | Needs 160 dedicated cross-pool links (real infra cost) *and* rollout's shard layout must exactly match training's (TP=4×EP=40) — the same "same-layout, no-reshard" trick already used for colocated-on-8i, just applied cross-pool. |
+| **N_t parallel links, mismatched layout** | ~0.106 s transfer + **unmodeled reshard cost** | Same infra cost, but rollout must reshuffle 160 incoming pieces into its own layout. Real anchor for how bad this gets: HybridFlow's own measured reshard cost for a much smaller 70B *dense* model was up to 36.4% of iteration time naively, ~11.7 s average even with their optimized engine, up to 78.2 s worst case — for this project's 236B MoE model, plausibly *worse* than the 2.75 s single-link baseline, not better. |
+
+**The catch on the fast option**: matched-layout parallel transfer
+requires N_r=N_t=160 — but disaggregated's whole point (Phase 3's own
+pool-size-ambiguity finding, above) is that rollout and training get
+*independently* right-sized pools (e.g. N_r≈32–40 for the AReaL-matched
+throughput balance, not 160). Forcing N_r=160 to get the cheap transfer
+collides directly with that. No free lunch: every route to "faster"
+either costs more physical links, or gives up independent pool-sizing,
+or reintroduces resharding.
+
+**Working decision for Phase 3's synthesis**: carry the single-link
+**≈2.75 s** as the default sync cost — needs no extra infra assumptions
+and no reshard modeling. Flag the matched-layout-parallel option as a
+real, cheaper alternative *contingent on* accepting N_r=N_t, left for
+item 4's synthesis to weigh rather than resolved here (same treatment
+the pool-size ambiguity itself already got).
+
 ---
 
 ## Open Threads / Flags carried into Phase 2+
