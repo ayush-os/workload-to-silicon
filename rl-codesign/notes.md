@@ -1119,6 +1119,43 @@ real, cheaper alternative *contingent on* accepting N_r=N_t, left for
 item 4's synthesis to weigh rather than resolved here (same treatment
 the pool-size ambiguity itself already got).
 
+### Colocated resharding cost — scoped down, not derived (item 3)
+
+**Why this doesn't need a full derivation**: the strongest colocated
+number already in hand (above, "Colocated on one physical chip") is the
+**same-layout-on-8i** choice — TP=2×EP=40=80 devices, identical
+parallelism grid for both rollout- and training-mode. Devices sit at the
+same (TP, EP) coordinate in both modes, so switching modes means
+switching *what compute runs locally*, not *redistributing which shard
+lives where*. That's a genuinely zero-reshard transition, not just a
+cheap one — HybridFlow's own "zero memory redundancy" claim (Phase 0,
+`notes.md` top) turns out to hold in both the memory *and* time sense
+for this specific config, precisely because there's nothing to reshard.
+This is already the number carried forward into item 4 — no reshard
+cost needs to be added on top of the 3.76×/1.93× colocated ratios.
+
+**The alternative, flagged but deliberately not chased**: a
+*different*-layout colocated setup (e.g. wide-EP-only for rollout mode,
+TP+EP for training mode — the layouts Phase 3's own sensitivity sweep
+showed were R-dependently optimal) would need a real HybridFlow-style
+reshard step between modes, paid every time the pool switches roles.
+Real anchor for that cost, already sourced (Phase 0): HybridFlow's own
+measured numbers on a 70B *dense* model — up to **36.4%** of iteration
+time naively, **~11.7 s average** even with their optimized resharding
+engine, up to **78.2 s** worst case. For this project's 236B *MoE*
+model, no scaled version derived — plausibly worse (more parameters,
+more shards to redistribute) but not quantified.
+
+**Why not derive it further**: the same-layout variant is already the
+better answer in hand (avoids the cost entirely rather than minimizing
+it), and deriving the different-layout reshard cost precisely wouldn't
+change the working colocated number carried into item 4 — it would only
+produce a second, deprioritized data point for a config already known to
+be worse. Matches this project's own repeated scope discipline
+(selective recomputation, N=640 sensitivity, exact TP×EP activation
+rederivation — all flagged and not chased for the same reason: the
+answer already in hand is sufficient for the checkpoint).
+
 ---
 
 ## Open Threads / Flags carried into Phase 2+
