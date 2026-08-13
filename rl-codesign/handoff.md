@@ -6,6 +6,12 @@ this file (current status, what's next).
 
 ## Status
 
+**Headline finding so far**: rollout is most likely more of a
+bottleneck than training; the magnitude of that dominance depends on
+the length of rollouts (R), your chip count, and your sharding scheme.
+Full derivation and the one known exception in `notes.md`'s Phase 3
+section.
+
 **Phase 0, Phase 1, and Phase 2 are complete. Phase 3 is well underway**
 — the shared rollout:train wall-clock/chip-ratio question is derived
 from multiple angles (mismatched, matched-chip, cross-chip-tax,

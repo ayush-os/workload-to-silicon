@@ -595,6 +595,13 @@ sourced.
 
 ## Phase 3 — Colocated vs. disaggregated architectures (in progress)
 
+**Headline, survives every check run this phase — read this before the
+detail below**: rollout is most likely more of a bottleneck than
+training; the magnitude of that dominance depends on the length of
+rollouts (R), your chip count, and your sharding scheme. "Most likely,"
+not "always" — one real exception exists (EP=160-only-no-TP's R≈10⁶
+asymptotic crossover, see below), everything else tested gave ratio >1.
+
 ### Rollout:train wall-clock split, per full RL step
 
 Shared input both sub-architectures need (colocated's wall-clock split,
