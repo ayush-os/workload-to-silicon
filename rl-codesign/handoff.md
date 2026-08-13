@@ -6,8 +6,13 @@ this file (current status, what's next).
 
 ## Status
 
-**Phase 0, Phase 1, and Phase 2 are complete.** Phase 3 (colocated vs.
-disaggregated architectures) has not started.
+**Phase 0, Phase 1, and Phase 2 are complete. Phase 3 is well underway**
+— the shared rollout:train wall-clock/chip-ratio question is derived
+from multiple angles (mismatched, matched-chip, cross-chip-tax,
+throughput-balanced disaggregated), but the two remaining concrete
+pieces (weight-broadcast topology, sync-boundary transfer cost) and the
+final synthesis are not yet done. See "What's next" below for the exact
+four items to pick up.
 
 ## What's done
 
@@ -119,18 +124,88 @@ for Phase 3's cross-chip weight-sync derivation, though it's not yet
 confirmed whether 8t/8i pods even share a fabric for that traffic
 (flagged in `notes.md`, don't assume without checking).
 
-## What's next: Phase 3 (colocated-resharding vs. disaggregated-pipelined)
+## What's done so far in Phase 3
 
-Per `spec.md`: derive both ends of the real spectrum — HybridFlow-style
-colocated (one chip pool, wall-clock split between rollout/training
-modes, real resharding-transition cost) vs. RhymeRL/AReaL/StreamRL-style
-disaggregated (separate pools, disagg's own chip-ratio methodology
-reused, weight-broadcast instead of KV-cache handoff). Two inputs are
-already sitting ready from the Decision 2 revision and Phase 2: the
-cross-chip FP4(8t)→FP4(8i) weight-sync question (real ICI bandwidth
-sourced, 19.2 Tb/s/chip, though fabric-sharing between 8t/8i pods is
-unconfirmed), and the rollout:train resource split itself (Phase 1's
-rollout numbers vs. Phase 2's 160-device training config).
+All in `notes.md`'s Phase 3 section, this session's work — read that
+section in full before continuing, this summary is a pointer, not a
+substitute.
+
+1. **Rollout:train wall-clock split derived from four angles**, each
+   answering a genuinely different question — don't collapse them into
+   one number:
+   - **Mismatched pools** (EP=8 rollout vs. 160-device training, each
+     independently capacity-sized): 34.6×→21.1×, asymptotes to **16.1×**
+     as R→∞, never crosses over. This is the *disaggregated*-flavored
+     input (separate, unevenly-sized pools by design), not colocated.
+   - **Matched-chip colocated** (both phases forced to the same N, since
+     training's capacity floor sets the pool size): tested across
+     multiple parallelism layouts (EP=160-alone, TP=4×EP=40, TP=4×EP=160)
+     — ratio ranges **2.2×–13.8×** depending on config and R, direction
+     robust, magnitude isn't. Two real sub-findings: optimal rollout
+     layout is R-dependent (TP helps more at short R, wide EP helps more
+     at long R), and adding proportionally more chips to *both* sides
+     widens the ratio in training's favor, it doesn't close it.
+   - **Colocated on one physical chip** (the real constraint colocation
+     forces, since TPU 8t/8i are physically different silicon, not modes
+     of one chip): chose 8i (rollout stays native, training eats a
+     2.50× tax) with matched TP=2×EP=40=80-device layout for both modes
+     (no weight-reshard needed) — tightest colocated number yet,
+     **3.76× (R=8,192) / 1.93× (R=65,536)**.
+   - **Disaggregated, real throughput-balanced chip ratio** (not the
+     mismatched-pool number above — this solves for N_t that equalizes
+     service time with a chosen N_r, on each phase's own native chip, no
+     cross-chip tax at all): ratio climbs with N_r, converges to AReaL's
+     real ~3:1 empirical split around N_r≈32–40 at R=8,192; needs a much
+     larger N_r to reach the same ratio at R=65,536 (real, new finding —
+     longer R needs proportionally more rollout chips to sustain a given
+     balance ratio).
+2. **Pool size (N) is a free variable, not derivable in isolation** —
+   minimizing the rollout:train ratio and minimizing total step wall-clock
+   are *different objectives* that move in opposite directions as N
+   grows. Resolved by deferring colocated's "right" N to whatever total
+   budget the disaggregated derivation lands on (not yet finalized — see
+   step 4 below).
+3. **One claim walked back mid-session**: "training has no structural
+   bottleneck, ever" was overstated — only verified for the specific
+   configs tested (TP held fixed while EP widened). Whether scaling TP
+   *proportionally* removes rollout's floor too is genuinely unknown,
+   and deliberately not chased (no TP/EP communication-overhead modeling
+   anywhere in this project, and V2's real attention head count — the
+   actual TP ceiling — isn't sourced). Don't re-assert the strong version
+   of this claim without addressing those two gaps first.
+
+## What's next: four concrete items
+
+1. **Disaggregated's weight-broadcast topology** (per `spec.md`): when
+   training finishes a step, updated weights need to reach every rollout
+   worker — point-to-point, broadcast, or tree? Reuse MoE's own
+   mesh-vs-switch topology reasoning (this repo's `moe-routing-notes.md`)
+   since broadcast-to-many-workers is a different traffic pattern than
+   MoE's dispatch or disagg's point-to-point KV handoff.
+2. **The FP4(8t)→FP4(8i) sync-boundary transfer cost itself** — pairs
+   directly with #1 (topology gives the pattern, this gives the time).
+   Ingredients already sourced: weight bytes ≈118 GB (236B params ×
+   0.5 B/param FP4), ICI bandwidth 19.2 Tb/s/chip. Still unconfirmed:
+   whether 8t/8i pods share the ICI fabric for this traffic at all (flag
+   in `notes.md`'s Open Threads), and whether the two chips' FP4 formats/
+   scaling conventions match byte-for-byte (don't assume).
+3. **Colocated resharding cost — scoped down, not a full derivation.**
+   The same-layout-on-8i alternative (found this session) avoids
+   weight-reshard entirely by paying the cross-chip tax instead, and
+   that's now the strongest colocated number in hand. Recommend noting
+   "different-layout colocated, real HybridFlow-style reshard cost" as a
+   flagged-but-deprioritized alternative rather than deriving it in full
+   — matches this project's own scope discipline, and the same-layout
+   variant is arguably the better answer already.
+4. **The actual comparison — Phase 3's real checkpoint.** Once #1–2 give
+   disaggregated's complete cost (chip ratio + broadcast + sync
+   transfer), synthesize: under what conditions (model size, cluster
+   size, rollout:train FLOPs ratio, R) does colocated vs. disaggregated
+   win? This is the deliverable `spec.md` actually asks for — everything
+   above is an input to it, not the answer itself. This is also where
+   the pool-size-ambiguity open item (above) gets resolved: match
+   colocated's N to whatever total chip budget the disaggregated
+   derivation settles on, for a fair comparison.
 
 ## Open threads to keep in view
 
@@ -159,6 +234,14 @@ revision).
 
 Both chips: 19.2 Tb/s/chip ICI bandwidth (2× prior gen) — candidate
 number for Phase 3's weight-sync derivation, fabric-sharing unconfirmed.
+
+**This session's Phase 3 numbers**: colocated-on-8i's parallelism config
+is **TP=2×EP=40 = 80 devices** (211.6 GB/216... i.e. /288 GB 8i budget,
+76.4 GB headroom) — distinct from Phase 2's training-on-8t config
+(TP=4×EP=40=160 devices, 174.7 GB/216 GB). Training's cross-chip tax
+running on 8i instead of native 8t: **2.50×** slower (2× from half the
+chips × 1.248× from 8i's lower FP4 peak). Weight bytes for the Phase 3
+sync-transfer derivation: **≈118 GB** (236B params × 0.5 B/param FP4).
 
 ## Not done, deliberately
 
