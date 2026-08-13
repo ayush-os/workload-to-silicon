@@ -1156,6 +1156,112 @@ be worse. Matches this project's own repeated scope discipline
 rederivation — all flagged and not chased for the same reason: the
 answer already in hand is sufficient for the checkpoint).
 
+### Item 4: the colocated-vs-disaggregated comparison
+
+**Rollout's optimal TP/EP split is a real 2D surface (N_r, R), not a
+fixed choice — correction to the earlier "R-dependent" finding.**
+Working the tradeoff out algebraically: `total(TP) = A/TP + C(R)·TP/N_r`,
+where A=108.17 MB is attention's replicated-weight term (shrinks with
+TP, independent of N_r) and C(R) = 2064.4 + 640·(1024+R/2)·288/1e6 MB
+bundles FFN's fixed coefficient with cache's R-dependent one (both
+shrink with EP = N_r/TP, so every device TP takes is a device EP loses).
+This has a real minimum, not a monotonic slope: **TP\* = √(A·N_r/C(R))**.
+Explains the earlier empirical finding cleanly — TP\* grows with N_r
+(more EP capacity to spare, worth paying into TP) and shrinks with R
+(cache's growing weight in C(R) makes EP more precious at long
+sequences). What was previously read as "optimal layout is R-dependent"
+is really **one continuous surface in (N_r, R), not two separate
+observations** — the earlier sensitivity table was just a few scattered
+points on it.
+
+Applied to the three disaggregated chip-budget points (R=8,192):
+TP\*≈0.54 at N_r=8, TP\*≈1.2 at N_r=40 (both round to **TP=1**, pure EP
+still wins) — but TP\*≈2.4 at N_r=160, where **TP=2×EP=80 beats pure
+EP=160** (91.7 MB/layer/device vs. 126.97, a real ~28% improvement).
+
+**Correction to the "structural floor" claim from the pool-size-
+ambiguity work above**: the ≈6.18 s/≈49.46 s (R=8,192/65,536) floor as
+EP→∞ was computed under a **fixed TP=1** assumption — real, but not an
+absolute floor. Once TP is also allowed to scale optimally with N_r
+(as just derived), attention gets sharded away too, and rollout time
+falls as **O(1/√N_r) without a floor**, not asymptoting to a fixed
+value. The 6.18s/49.46s number should be read as "the floor *given*
+TP=1 is fixed," not "the floor, full stop."
+
+**N_t=160 is optimal, not just a minimum — a real consequence of
+rollout dominating, not a coincidence.** Training is compute-bound with
+clean strong-scaling (no structural floor the way rollout has
+memory-bound terms) — more N_t directly buys more training speed in
+isolation. But `disagg_cost(N_r) = max(rollout_time(N_r),
+train_time(N_t))`, and `train_time(160)` (0.80 s / 24.86 s) already
+sits below rollout's achievable range at every N_r this project tests —
+training was never the binding constraint, so N_t beyond 160 would only
+add idle, wasted chips with zero effect on `disagg_cost`. Given the
+newly-uncapped rollout scaling above, there's a real (if extreme)
+crossover where this stops holding: rough back-of-envelope, solving
+`rollout_time(N_r) = train_time(160)` under optimal-TP scaling gives
+**N_r ≈ 10,000** at R=8,192 — ~60× the largest N_r this project tests
+(640). Real, flagged, not chased — nowhere near any config actually
+used here, same discipline as the earlier TP-scaling-ceiling flag.
+
+**Corrected disaggregated rollout, using optimal TP per N_r:**
+
+| N_r | TP\* | Config | R=8,192 | R=65,536 |
+|---|---|---|---|---|
+| 8 | 0.54→1 | EP=8 (TP=1) | 27.82 s (unchanged) | 523.65 s (unchanged) |
+| 40 | 1.2→1 | EP=40 (TP=1) | 10.63 s (unchanged) | 144.42 s (unchanged) |
+| 160 | 2.4→2 | TP=2×EP=80 | **5.39 s** (was 7.41 s) | **72.27 s** (was 73.31 s) |
+
+**The chip-budget-matched comparison** (disaggregated total = 160+N_r;
+colocated matched to the same total, same-layout-on-8i, TP=2×EP=N/2 —
+colocated's TP=2 stays fixed here since it's driven by *training's*
+capacity constraint at the reference N=80 config, not re-optimized for
+rollout the way disaggregated's is; whether TP=2 is still strictly
+required for capacity at larger N is flagged, not re-derived):
+
+| Total chips | Disaggregated `max(rollout,train)` | Colocated (serial) | Colocated wins by |
+|---|---|---|---|
+| 168 (N_r=8) | 27.82 s / 523.65 s | 6.24 s / 99.57 s | **4.5× / 5.3×** |
+| 200 (N_r=40) | 10.63 s / 144.42 s | 5.76 s / 87.15 s | **1.85× / 1.66×** |
+| 320 (N_r=160) | 5.39 s / 72.27 s | 4.82 s / 64.08 s | **1.12× / 1.13×** |
+
+**Headline finding, properly conditioned (see Decision 3 below before
+treating this as a takeaway)**: colocated wins at every chip budget
+tested, at both R anchors — margin shrinks sharply with scale
+(4.5×→1.85×→1.12×), converging toward near-parity, but never actually
+crossing over in the tested range. **This is the opposite of RLinf's
+claimed pattern** (disaggregation wastes compute small-scale, colocation
+stalls large-scale) — a real result for *this model's* own very lopsided
+rollout:train FLOPs ratio (rollout dominates by 2×–35× per the earlier
+wall-clock-split findings), not a universal law. Mechanism: disaggregated
+pays a fixed 160-device training tax that sits almost entirely idle
+(train finishes in under a second while rollout is still running), a
+real structural waste that shrinks only as total budget grows large
+enough for the fixed tax to become a small fraction of it; colocated
+never pays that tax because the same chips serve both roles.
+
+**This finding is conditional on fully on-device optimizer state — see
+Decision 3 immediately below.** The 160-device training floor driving
+the entire mechanism above is ~70%-composed of optimizer state bytes;
+offloading that (as this project's own anchor workload, R1, actually
+does) would shrink the floor and directly undercut this result. Read the
+headline as "colocated wins, given neither architecture offloads
+optimizer state" — not as an unconditional recommendation.
+
+**What's not yet chased, flagged for completeness**:
+1. Whether colocated's own TP should also float with N (rather than
+   staying pinned at TP=2) — if it can, colocated might get the same
+   O(1/√N) rollout scaling disaggregated now has, which would keep
+   colocated's asymptotic advantage rather than letting the margin
+   converge toward parity. Not derived — would also require re-checking
+   whether TP=2 remains *required* for training's capacity at larger N,
+   or becomes optional.
+2. The N_r≈10,000 training-becomes-bottleneck crossover, above.
+3. RLinf's own claim may hold at different model sizes or rollout:train
+   ratios than this project's specific 236B MoE / R∈{8192,65536}
+   configuration — not tested, the finding above is scoped to this
+   project's own numbers, not a general refutation.
+
 ---
 
 ## Open Threads / Flags carried into Phase 2+
