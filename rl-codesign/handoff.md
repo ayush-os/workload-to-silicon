@@ -6,19 +6,23 @@ this file (current status, what's next).
 
 ## Status
 
-**Headline finding so far**: rollout is most likely more of a
-bottleneck than training; the magnitude of that dominance depends on
-the length of rollouts (R), your chip count, and your sharding scheme.
-Full derivation and the one known exception in `notes.md`'s Phase 3
-section.
+**Two headline findings now**: (1) rollout is most likely more of a
+bottleneck than training at the *workload* level — the magnitude of
+that dominance depends on R, chip count, and sharding scheme (Phase 1–2
+work). (2) At the *architecture* level (item 4, this session):
+**colocated beats disaggregated at every chip budget this project
+tested**, margin shrinking from ~4.5× to ~1.1× as total chips scale from
+168→320 but never crossing over — the opposite of RLinf's claimed
+pattern (disaggregation wastes compute small-scale, colocation stalls
+large-scale). Real result, scoped explicitly to this project's own very
+lopsided rollout:train FLOPs ratio (236B MoE, R∈{8192,65536}) — not
+asserted as a universal law. Full derivation in `notes.md`'s Phase 3
+section, "Item 4: the colocated-vs-disaggregated comparison."
 
-**Phase 0, Phase 1, and Phase 2 are complete. Phase 3 is well underway**
-— the shared rollout:train wall-clock/chip-ratio question is derived
-from multiple angles (mismatched, matched-chip, cross-chip-tax,
-throughput-balanced disaggregated), and items 1–3 (weight-broadcast
-topology, sync-boundary transfer cost, colocated resharding) are now
-resolved this session too. See "What's next" below — the final
-synthesis (item 4) is the one remaining piece.
+**Phase 0, 1, and 2 are complete, and Phase 3's checkpoint is now met**
+— both architectures' cost models are derived, and item 4 gives a
+stated, mechanistically-explained answer for which wins under which
+conditions, per `spec.md`'s own checkpoint language.
 
 ## What's done
 
@@ -214,17 +218,56 @@ is flagged as a deprioritized data point, not derived for this project's
 236B MoE scale — the same-layout answer already in hand is better, so
 deriving the alternative wouldn't change what's carried into item 4.
 
-## What's next: one remaining item
+## What's done: item 4 (this session) — Phase 3's real checkpoint
 
-1. **The actual comparison — Phase 3's real checkpoint.** Now that
-   disaggregated's complete cost is in hand (chip ratio + broadcast +
-   sync transfer, ≈2.75 s single-link default), synthesize: under what
-   conditions (model size, cluster size, rollout:train FLOPs ratio, R)
-   does colocated vs. disaggregated win? This is the deliverable
-   `spec.md` actually asks for — everything above is an input to it, not
-   the answer itself. This is also where the pool-size-ambiguity open
-   item (above) gets resolved: match colocated's N to whatever total chip
-   budget the disaggregated derivation settles on, for a fair comparison.
+Full derivation in `notes.md`'s "Item 4: the colocated-vs-disaggregated
+comparison" subsection. Key pieces, in the order they were derived:
+
+1. **N_t is fixed-and-optimal at 160, not just a minimum.** Training's
+   own capacity floor (Phase 2) forces N_t≥160 on native 8t regardless
+   of throughput considerations — this *corrects* the earlier
+   throughput-balance sweep's N_t values (as low as ≈5), which solved
+   `train_time=rollout_time` without checking feasibility. Since
+   `train_time(160)` already sits below rollout's achievable range at
+   every tested N_r, training is never the bottleneck, and N_t>160 would
+   only waste chips — 160 is optimal, not just minimal.
+2. **Rollout's optimal TP/EP split is a real (N_r, R) surface**, closed
+   form `TP* = √(A·N_r/C(R))` — corrects an earlier claim that "optimal
+   layout is R-dependent" to the sharper "R-*and*-N_r-dependent," and
+   corrects the earlier "structural floor ≈6.18s/49.46s" claim (that was
+   under fixed TP=1 only — with optimal TP, rollout time falls as
+   O(1/√N_r), no hard floor).
+3. **Sync cost (2.75 s) verified hideable** within a single pipeline
+   cycle at every tested config (checked, not assumed — stays under 45%
+   of cycle time even at rollout's fastest tested point) — dropped from
+   disaggregated's cost model entirely.
+4. **Chip-budget-matched comparison**, disaggregated total = 160+N_r vs.
+   colocated at the same total N:
+
+   | Total chips | Disaggregated | Colocated | Colocated wins by |
+   |---|---|---|---|
+   | 168 | 27.82 s / 523.65 s | 6.24 s / 99.57 s | 4.5× / 5.3× |
+   | 200 | 10.63 s / 144.42 s | 5.76 s / 87.15 s | 1.85× / 1.66× |
+   | 320 | 5.39 s / 72.27 s | 4.82 s / 64.08 s | 1.12× / 1.13× |
+
+   Mechanism: disaggregated pays a fixed 160-device training tax that
+   sits almost entirely idle (training finishes in under a second while
+   rollout is still running) — a real structural waste that only shrinks
+   as a fraction of the total as the budget scales up. Colocated never
+   pays it, since the same chips serve both roles.
+
+**Flagged, not chased** (real loose ends, don't re-derive without reason):
+- Whether colocated's own TP should also float with N (pinned at TP=2
+  here, inherited from training's capacity requirement at the reference
+  N=80 config) — if it can, colocated might keep its O(1/√N) advantage
+  rather than converging toward parity as N grows.
+- A back-of-envelope crossover where training *would* become the
+  bottleneck (N_r≈10,000 at R=8,192) — ~60× the largest N_r this project
+  tests, real but far outside any tested config.
+- RLinf's claimed pattern may hold at different model sizes or
+  rollout:train ratios than this project's own 236B MoE config — the
+  finding above is scoped to this project's numbers, not a general
+  refutation of RLinf.
 
 ## Open threads to keep in view
 
