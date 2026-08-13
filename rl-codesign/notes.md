@@ -1305,6 +1305,60 @@ response too. Two stacked idealizations don't bound the truth cleanly;
 they produce a number that looks more precise than it is. The
 directional statement above is the honest resolution.
 
+**Rollout Routing Replay — resolved** (flagged since Phase 0/Miles,
+deferred through Phase 1 and Phase 2, closed out here). The mechanism:
+MoE routing decisions (which experts a token uses) can drift between
+rollout's inference engine and training's recomputed forward pass —
+replay fixes this by shipping rollout's actual routing choices to
+training rather than letting training re-derive its own, which could
+pick different experts and desync the gradient from what actually
+generated the completion.
+
+*Systems cost, bounded and checked* (not a new research axis like
+offloading — reuses this project's own MoE conventions): assuming
+DeepSeek-V2's real top-6 routing (flagged as an assumption pulled from
+the known architecture, not independently sourced elsewhere in this
+project) — routing indices cost 6 bytes/token/layer × 59 MoE layers =
+354 bytes/token.
+
+| | R=8,192 | R=65,536 |
+|---|---|---|
+| Total tokens (512 completions × R) | 4,194,304 | 33,554,432 |
+| Routing metadata | ≈1.48 GB | ≈11.88 GB |
+| As % of weight payload (118 GB) | 1.3% | 10.1% |
+
+Not negligible in absolute bytes at long R, but this flows
+**rollout→training**, opposite direction from the weight sync
+(training→rollout) — so it's a genuinely different question than "does
+it add bytes to the dominant transfer," and needs its own timing check
+rather than an assumed answer.
+
+**First-pass reasoning (wrong, corrected in dialogue) vs. the real
+answer** — worth keeping both, since the correction is the actual
+lesson: full-duplex bandwidth-sharing was correctly invoked (the two
+transfers don't compete for the same direction's bytes), but that's a
+different claim from "training doesn't have to wait for it," which is
+false — unlike weight-sync (which has a full cycle of slack *by design*,
+since staleness means rollout deliberately uses last-step's weights),
+there's no equivalent staleness cushion on this side: training genuinely
+cannot start step i until it has batch i's completions+metadata. That's
+a real, structural dependency latency (T_meta), not something
+bandwidth-sharing makes disappear.
+
+**Checked against the real margin, not assumed away**: T_meta itself is
+small (≈0.03 s at R=8,192, ≈0.24 s at R=65,536). The real question is
+whether `T_meta + train_time` still clears rollout_time with room to
+spare — checked at the tightest tested point (N_r=160, R=65,536, where
+the rollout/train gap is smallest): `0.24 + 24.86 = 25.10 s` vs.
+`rollout_time = 72.27 s` — still a wide margin. Holds at every other
+tested point too (train is never within an order of magnitude of
+rollout). **Conclusion**: T_meta is a real, structural latency between
+rollout finishing and training starting — not literally "hidden" — but
+small enough relative to the rollout/train gap that it never pushes
+training past rollout's own cadence, so it doesn't change steady-state
+throughput. A genuine pipeline-fill/scheduling detail, not a
+critical-path addition to the number that actually matters.
+
 ---
 
 ## Open Threads / Flags carried into Phase 2+
