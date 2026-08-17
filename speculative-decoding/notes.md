@@ -106,3 +106,122 @@ retain/evict within what's currently a single free/keep unit in both
 systems.
 
 ---
+
+## Phase 1 — Verification-regime roofline
+
+### Mechanism, first-principles
+
+Why speculative decoding wins despite the target model still running a
+full attention/forward pass: plain autoregressive decode is memory-bound
+because `seq_len_q=1` — FLOPs per step are tiny, but the entire model's
+weights plus the KV cache still have to stream from HBM to produce one
+token, so that huge fixed read cost is barely amortized. A forward
+pass's weight-read cost barely changes whether it processes 1 query
+token or K — weights are read once per layer and reused across however
+many tokens are in the pass (the same stationary/streamed reuse logic as
+GQA's own K/V reuse, generalized from "reused across query heads" to
+"reused across query tokens"). Speculative decoding exploits exactly
+this: guess K candidate tokens cheaply via a small draft model, then
+verify all K in *one* target-model pass, paying roughly the same fixed
+weight-read cost as one ordinary decode step but walking away with up
+to K accepted tokens instead of one. The verification pass isn't
+something spec decoding avoids running — it's the mechanism that cashes
+in the amortization. This project's attention-sublayer-only roofline
+below captures the KV-cache-specific version of that same story (the
+full-model-weights version is out of scope, matching this portfolio's
+established attention-sublayer-only scoping used throughout
+prefill/decode).
+
+### FLOPs and bytes, generalized for asymmetric seq_len_q ≠ seq_len_kv
+
+Verification's shape: `seq_len_q = tree_len` (flattened tree token
+count, small — tens of tokens), `seq_len_kv` = context length already
+cached (can be large). Genuinely asymmetric — unlike prefill's
+`seq_len_q = seq_len_kv` and decode's `seq_len_q = 1`.
+
+**Bytes** (compulsory, fused, int8, GQA):
+
+| Term | Formula | Note |
+|---|---|---|
+| Q | `batch × num_q_heads × tree_len × d_k` | scales with tree_len |
+| K | `batch × num_kv_heads × seq_len_kv × d_k` | **pinned to context length, independent of tree_len** — read once, shared/reused across every tree token's attention (K/V-stationary dataflow, same mechanism as GQA's own reuse, now generalized across tree positions, not just query heads) |
+| V | same as K | |
+| O | same as Q | attention-output activation, same shape convention as prefill §1.2's output row — **not** the accept/reject decision, which is a downstream LM-head/sampling step, out of scope for this sub-layer roofline |
+
+Total bytes = `2·batch·d_k·(num_q_heads·tree_len + num_kv_heads·seq_len_kv)`
+
+**FLOPs:**
+
+- QK^T = `2·batch·num_q_heads·tree_len·seq_len_kv·d_k` (contraction dim = `d_k`)
+- P·V = `2·batch·num_q_heads·tree_len·seq_len_kv·d_k` (contraction dim = `seq_len_kv`) — same formula as QK^T despite different M/N/K role assignments, the same coincidence prefill §1.1 found, confirmed to hold in the asymmetric case too (both matmuls always reduce to `2×M×N×K` with the same three values, just relabeled)
+
+Total FLOPs = `4·batch·num_q_heads·tree_len·seq_len_kv·d_k`
+
+**Validated against known cases**: at `seq_len_q = seq_len_kv = 8192`
+this exactly reproduces prefill's 2⁴⁶ FLOPs; at `seq_len_q = 1` it
+exactly reproduces decode's 2³³.
+
+**Softmax FLOPs negligibility, re-checked for the asymmetric case**:
+matmul FLOPs and softmax FLOPs share the same `seq_len_q × seq_len_kv`
+(= |P|, the P-matrix element count) factor — it cancels completely in
+their ratio, leaving `ratio ≈ 4·d_head/c` (c = softmax's small
+per-element op count: subtract-max, exp, sum, divide), independent of
+`seq_len_q`, `seq_len_kv`, or the gap between them. Prefill's ~128×
+negligibility argument carries over unchanged — neither strengthened nor
+weakened by decoupling `seq_len_q` from `seq_len_kv` — confirmed via the
+algebra, not assumed.
+
+### AI(tree_len)
+
+`batch` and `d_k` cancel completely out of the ratio:
+
+**AI(tree_len) = 2·num_q_heads·tree_len·seq_len_kv / (num_q_heads·tree_len + num_kv_heads·seq_len_kv)**
+
+Batch size has zero effect on regime — confirmed by direct algebraic
+cancellation. Only `tree_len`, `seq_len_kv`, `num_q_heads`,
+`num_kv_heads` matter.
+
+### Concrete numbers
+
+Continuity workload: `num_q_heads=64`, `num_kv_heads=8` (GQA),
+`seq_len_kv=8192`, ridge point `C≈480.5` FLOPs/byte (TPU v5e, int8) —
+same chip/workload prefill and decode used.
+
+Two Medusa-sourced (arXiv:2401.10774) tree shapes:
+
+- **8 nodes** (paper's own toy example: head-1 top-2, head-2 top-3,
+  Cartesian — flattened node count = 2+2×3=8, not the 6 leaf-path
+  count): **AI ≈ 127.0** → memory-bound (127 << 480.5)
+- **64 nodes** (Medusa's real deployed sparse-tree config, 5 heads):
+  **AI ≈ 963.6** → compute-bound (964 >> 480.5)
+
+**Key finding — boundary validation, not planned in advance.**
+`AI(tree_len)` is the *exact same continuous curve* that decode and
+prefill sit at the two endpoints of:
+
+- `tree_len = 1` (literal decode shape) → AI ≈ 16.0, matches
+  `decode_notes.md`'s real GQA decode AI (≈15.98) almost exactly.
+- `tree_len = 8192` (literal prefill shape, `seq_len_q = seq_len_kv`) →
+  AI ≈ 14,564, matches `prefill_notes.md` §1.3's fused GQA AI (≈14,564)
+  exactly.
+
+So `tree_len` is literally the lever that interpolates verification
+continuously between decode's memory-bound regime and prefill's
+compute-bound regime — not just a qualitative analogy, an exact
+quantitative match at both boundaries using the same formula.
+
+### Not yet done / open for next session
+
+- **Exact symbolic crossover** (`AI(tree_len) = 480.5`, solved for
+  `tree_len`) — deliberately deferred. Agreed to do concrete plug-ins
+  first (matches `spec.md`'s literal phrasing: "compute AI at that
+  shape" for "a couple of concrete... tree shapes") and only generalize
+  to the exact threshold if the concrete numbers make it interesting.
+- **Unfused case** (P-matrix round-trip to HBM, matching prefill's
+  fused-vs-unfused pair) — not yet derived for verification's shape.
+- **Batch-vs-tree-size tradeoff, spec.md's explicit deliverable
+  phrasing** — technically already answered (batch cancels, doesn't
+  affect regime at all) but not yet written up as its own explicit
+  statement against that phrasing.
+
+Neither open item blocks moving to Phase 2 — see `handoff.md`.
