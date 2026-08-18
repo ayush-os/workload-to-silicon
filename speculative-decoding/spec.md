@@ -67,6 +67,22 @@ explicit fallback**, not a discarded option — see Fallback below.
   a *self-speculative* setup, not a standalone-draft-model one. Flag this
   now: the number needs re-verification for this project's different
   setup before being reused, not just cited.
+- **Groq's real, current production spec-decode stack, and the Groq 3
+  LPX architecture** (2026, paired with NVIDIA Rubin GPUs) — direct,
+  current grounding for Phase 2, not a hypothetical: an SRAM-resident LPU
+  generates drafts (fast specifically because SRAM residency makes
+  drafting cheap), a GPU verifies. Real evidence that SRAM residency
+  doesn't eliminate speculative decoding's value — it changes which side
+  of the draft/verify split benefits, and can make verification itself
+  nearly free (target weights also SRAM-resident). Read this closely; it's
+  close to a live precedent for exactly the synchronous draft/verify
+  placement question Phase 2 derives from scratch.
+- **MatX One's real, confirmed hybrid SRAM+HBM architecture** (Feb 2026
+  Series B announcement) — worth confirming explicitly, since it's the
+  #1 target company: MatX is *not* SRAM-only. HBM specifically carries
+  KV cache and long-context; weights get the SRAM-first treatment. The
+  bandwidth tension Phase 1 derives is directly live for this specific
+  target, not a stale GPU-era assumption.
 
 ### 🧠 Decision 1: tree-structured, chain as fallback (recorded, not
 re-litigated)
@@ -147,6 +163,27 @@ shape.
 determination, as a function of (tree depth, branching factor, batch
 size) — a real, derived answer, not assumed from either prior project's
 regime.
+
+**A real second sub-question this roofline framing forces, worth making
+explicit rather than assumed either way**: speculative decoding's benefit
+on GPU-class hardware is usually attributed to one mechanism — amortizing
+HBM bandwidth across more tokens per forward pass. But there's a second,
+distinct mechanism underneath it: batch-1 decode leaves compute arrays
+underutilized regardless of memory technology (tiny matmuls), and
+verifying a flattened tree in one pass is a bigger matmul than one token
+at a time, independent of where weights live. **Derive both mechanisms
+separately** against this project's own roofline numbers, then check what
+happens to each under an SRAM-resident regime (Groq's real ~230–500MB/
+chip SRAM, or Cerebras's real 44GB on-die, no-HBM case): does the
+bandwidth-amortization term vanish (plausible — SRAM bandwidth is
+real-world ~40-150 TB/s+ versus HBM's ~3-22 TB/s, per the reading above)
+while the compute-utilization term survives, or does something else
+happen? A real, derived split, not an assumed "SRAM makes this moot" or
+"SRAM doesn't change anything" — both are unearned until this phase
+actually runs the numbers. MatX's own confirmed hybrid SRAM+HBM design
+means this project's primary target doesn't even require resolving the
+fully-SRAM edge case to stay relevant — but Groq and Cerebras are real,
+current, worth deriving explicitly rather than leaving as a hand-wave.
 
 ---
 
