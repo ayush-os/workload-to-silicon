@@ -421,6 +421,35 @@ Two real reasons remain, and this phase can only ground one of them:
   `spec.md` names this exact question as deliberately left for the build
   phase, not something this roofline derivation resolves.
 
+**Amdahl's-law sharpening of the specialization argument, plus a real
+capacity check on it.** Since draft is only ~15–18% of the round
+(15.2% v5e, 17.9% TPU 8i), making drafting arbitrarily fast (SRAM
+residency, effectively free) is capped by Amdahl's law at
+`1/(1−draft_fraction)` ≈ **1.18×** (v5e split) to **1.22×** (8i split)
+maximum total-latency improvement — the interesting lever for
+SRAM-residency isn't drafting at all, it's whether it could also
+compress verify's dominant ~82%+ term (the "target weights also
+SRAM-resident, verification itself nearly free" thread already flagged
+in `spec.md`'s Groq reading item).
+
+**It can't, for this target model, and not for a latency reason —
+a capacity one, the same theme recurring a third time in this project.**
+Groq's real SRAM is ~230–500MB/chip. At int8: draft (Llama-3-8B, ~8GB)
+needs `8000MB/500MB ≈ 16 chips` for weight capacity alone — tractable.
+Target/verify (Llama-3-70B, ~70GB) needs `70000MB/500MB = 140 chips`
+minimum, before KV-cache/activation headroom — real large-model Groq
+deployments do run on hundreds of chips for exactly this reason. So the
+real LPU/GPU split isn't only regime-matching (memory-bound draft ↔
+bandwidth chip, compute-bound verify ↔ compute chip) — there's an
+independent, capacity-forced reason underneath it: a 70B-class verify
+model is essentially unhoused on SRAM-only hardware at any sane chip
+count, while an 8B-class draft model is small enough that SRAM
+residency is genuinely viable. Same pattern as the v5e HBM-capacity
+finding above, now recurring one level down at SRAM granularity — this
+project keeps finding that a scoping choice free for a regime/ratio
+question turns out capacity-load-bearing once real hardware is asked to
+actually hold the model.
+
 **Checkpoint met**: round-latency model derived (symbolic + two concrete
 real-chip runs); real, non-hedged stated answer — synchronous coupling
 reverses disagg's default "separate chips" instinct on latency grounds

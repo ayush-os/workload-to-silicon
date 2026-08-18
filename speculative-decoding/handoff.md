@@ -74,6 +74,15 @@ memory-bound, verify is compute-bound, real Groq LPU/GPU precedent) or
 explicitly out of this phase's scope per `spec.md` — a build-phase
 scheduling question, not a roofline one).
 
+**Specialization sharpened further, post-checkpoint**: Amdahl's law caps
+SRAM-residency's max benefit to draft alone at ~1.18–1.22× (draft is
+only 15–18% of the round) — the real lever would be compressing verify's
+dominant ~82%+ term instead. But that's capacity-blocked, not just
+underexplored: Groq's real ~230–500MB/chip SRAM houses the 8B draft
+model in ~16 chips but would need ~140+ chips for the 70B target's
+weights alone — the same HBM-capacity theme from below, recurring one
+level down at SRAM granularity. Full numbers in `notes.md`.
+
 Also scope note carried forward: Phase 2 deliberately widened past
 Phase 1's attention-sublayer-only formula (to include weight bytes/FLOPs
 via full projection+SwiGLU-MLP terms) because model size became a live
